@@ -1,0 +1,6 @@
+# Parser fixtures must stay byte-identical. Windows autocrlf otherwise
+# rewrites LF PDFs to CRLF, which breaks stream lengths and pdf-extract.
+src-tauri/tests/fixtures/materials/*.pdf -text
+src-tauri/tests/fixtures/materials/*.docx -text
+src-tauri/tests/fixtures/materials/*.doc -text
+*.pdf -text

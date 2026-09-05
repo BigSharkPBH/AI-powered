@@ -148,7 +148,34 @@ mod tests {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/materials")
             .join(name);
-        std::fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+        let bytes =
+            std::fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        if name.ends_with(".pdf") {
+            assert!(
+                bytes.starts_with(b"%PDF-"),
+                "{} lost its PDF header; checkout probably rewrote it as text",
+                path.display()
+            );
+        }
+        bytes
+    }
+
+    #[test]
+    fn pdf_fixtures_keep_checked_in_bytes() {
+        let cases = [
+            (
+                "chinese-tounicode.pdf",
+                "7658f29be27a1585af037f06f5cae2204a81eb4a992b0f28eed8015fd771a707",
+            ),
+            (
+                "scanned-image-only.pdf",
+                "3d2dfd6f546b79cec224af14bf216adeb9430165893b49b38f2fa32090357ecb",
+            ),
+        ];
+        for (name, expected) in cases {
+            let digest = crate::materials::store::sha256_hex(&fixture(name));
+            assert_eq!(digest, expected, "{name} was rewritten on checkout");
+        }
     }
 
     #[test]
