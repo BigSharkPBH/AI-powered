@@ -12,7 +12,11 @@ use serde_json::Value;
 
 use crate::{
     config::ConfigStore,
-    materials::backup::{BackupError, file_sha256, reject_secret_bytes, write_scrubbed_config},
+    database::Database,
+    materials::backup::{
+        BackupError, file_sha256, reject_secret_bytes, require_integrity, verify_file_hashes,
+        write_scrubbed_config,
+    },
 };
 
 #[cfg(test)]
@@ -22,6 +26,10 @@ const ARCHIVE_MANIFEST: &str = "manifest.json";
 const ARCHIVE_CONFIG: &str = "config.json";
 const ARCHIVE_SQLITE: &str = "app.sqlite";
 const ARCHIVE_MATERIALS: &str = "materials";
+const DEST_SQLITE: &str = "app.sqlite3";
+const MIGRATED_FROM: &str = "migrated-from";
+const STAGING_DIR: &str = ".migrating";
+const STAGING_PREVIOUS: &str = ".migrating-previous";
 const ELECTRON_APP_NAMES: &[&str] = &["AI Virtual Assistant", "authorized-interview-screen-helper"];
 const REMOTE_ACCOUNT_TABLES: &[&str] = &[
     "accounts",
@@ -64,14 +72,145 @@ pub struct LegacyBackupReport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MigrateError {
     Operation,
+    HashMismatch,
+    Integrity,
+    SecretForbidden,
+    AlreadyApplied,
 }
 
 impl MigrateError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Operation => "MIGRATE_OPERATION_FAILED",
+            Self::HashMismatch => "MIGRATE_HASH_MISMATCH",
+            Self::Integrity => "MIGRATE_INTEGRITY_FAILED",
+            Self::SecretForbidden => "MIGRATE_SECRET_FORBIDDEN",
+            Self::AlreadyApplied => "MIGRATE_ALREADY_APPLIED",
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedLegacy {
+    pub archive_path: PathBuf,
+    pub files: Vec<String>,
+    pub omitted: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwitchReport {
+    pub dest_data_dir: PathBuf,
+    pub files: Vec<String>,
+    pub omitted: Vec<String>,
+    pub marker_path: PathBuf,
+}
+
+pub fn verify_legacy_archive(archive: &Path) -> Result<VerifiedLegacy, MigrateError> {
+    let staged = stage_archive_copy(archive)?;
+    let staged_root = staged.as_path();
+    let manifest = read_legacy_manifest(&staged_root.join(ARCHIVE_MANIFEST))?;
+    verify_file_hashes(staged_root, &manifest.hashes).map_err(map_backup)?;
+    verify_present_files(staged_root, &manifest)?;
+
+    if staged_root.join(ARCHIVE_CONFIG).is_file() {
+        let bytes =
+            fs::read(staged_root.join(ARCHIVE_CONFIG)).map_err(|_| MigrateError::Operation)?;
+        reject_secret_bytes(&bytes).map_err(map_backup)?;
+    }
+
+    if staged_root.join(ARCHIVE_SQLITE).is_file() {
+        let database = Database::open(staged_root.join(ARCHIVE_SQLITE))
+            .map_err(|_| MigrateError::Integrity)?;
+        require_integrity(&database).map_err(map_backup)?;
+    }
+
+    let mut files: Vec<String> = manifest.hashes.keys().cloned().collect();
+    files.sort();
+    let mut omitted = manifest.omitted;
+    omitted.sort();
+    omitted.dedup();
+
+    Ok(VerifiedLegacy {
+        archive_path: archive.to_path_buf(),
+        files,
+        omitted,
+    })
+}
+
+pub fn switch_legacy_archive(
+    archive: &Path,
+    dest_data_dir: &Path,
+) -> Result<SwitchReport, MigrateError> {
+    let verified = verify_legacy_archive(archive)?;
+    if dest_already_applied(dest_data_dir) {
+        return Err(MigrateError::AlreadyApplied);
+    }
+    if dest_data_dir.is_file() {
+        return Err(MigrateError::Operation);
+    }
+
+    let dest_was_missing = !dest_data_dir.exists();
+    let staging = dest_data_dir.join(STAGING_DIR);
+    let previous = dest_data_dir.join(STAGING_PREVIOUS);
+    let mut placed = Vec::new();
+
+    let result = (|| {
+        fs::create_dir_all(dest_data_dir).map_err(|_| MigrateError::Operation)?;
+        remove_path_if_exists(&staging)?;
+        remove_path_if_exists(&previous)?;
+        fs::create_dir_all(&staging).map_err(|_| MigrateError::Operation)?;
+
+        if archive.join(ARCHIVE_CONFIG).is_file() {
+            fs::copy(archive.join(ARCHIVE_CONFIG), staging.join(ARCHIVE_CONFIG))
+                .map_err(|_| MigrateError::Operation)?;
+        }
+        if archive.join(ARCHIVE_SQLITE).is_file() {
+            fs::copy(archive.join(ARCHIVE_SQLITE), staging.join(DEST_SQLITE))
+                .map_err(|_| MigrateError::Operation)?;
+        }
+        if archive.join(ARCHIVE_MATERIALS).is_dir() {
+            copy_tree(
+                &archive.join(ARCHIVE_MATERIALS),
+                &staging.join(ARCHIVE_MATERIALS),
+            )?;
+        }
+        make_tree_writable(&staging)?;
+        write_migrated_from_marker(&staging.join(MIGRATED_FROM), archive, &verified.omitted)?;
+
+        for name in dest_artifact_names(&verified.files) {
+            place_item(&staging.join(&name), &dest_data_dir.join(&name), &previous)?;
+            placed.push(name);
+        }
+        place_item(
+            &staging.join(MIGRATED_FROM),
+            &dest_data_dir.join(MIGRATED_FROM),
+            &previous,
+        )?;
+        placed.push(MIGRATED_FROM.to_owned());
+        Ok(())
+    })();
+
+    if let Err(error) = result {
+        for name in placed.iter().rev() {
+            restore_item(dest_data_dir, name, &previous);
+        }
+        let _ = fs::remove_dir_all(&staging);
+        let _ = fs::remove_dir_all(&previous);
+        if dest_was_missing {
+            let _ = fs::remove_dir_all(dest_data_dir);
+        }
+        return Err(error);
+    }
+
+    let _ = fs::remove_dir_all(&staging);
+    let _ = fs::remove_dir_all(&previous);
+
+    Ok(SwitchReport {
+        dest_data_dir: dest_data_dir.to_path_buf(),
+        files: dest_file_list(&verified.files),
+        omitted: verified.omitted,
+        marker_path: dest_data_dir.join(MIGRATED_FROM),
+    })
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -186,6 +325,254 @@ pub fn backup_legacy_into_app_data(
         .join("backups")
         .join(format!("legacy-{}", now.format("%Y%m%dT%H%M%SZ")));
     backup_legacy(root, &dest)
+}
+
+fn map_backup(error: BackupError) -> MigrateError {
+    match error {
+        BackupError::HashMismatch => MigrateError::HashMismatch,
+        BackupError::Integrity => MigrateError::Integrity,
+        BackupError::SecretForbidden => MigrateError::SecretForbidden,
+        BackupError::MaterialMissing | BackupError::Operation => MigrateError::Operation,
+    }
+}
+
+fn read_legacy_manifest(path: &Path) -> Result<LegacyBackupManifest, MigrateError> {
+    let bytes = fs::read(path).map_err(|_| MigrateError::Operation)?;
+    reject_secret_bytes(&bytes).map_err(map_backup)?;
+    serde_json::from_slice(&bytes).map_err(|_| MigrateError::Operation)
+}
+
+fn verify_present_files(
+    staged: &Path,
+    manifest: &LegacyBackupManifest,
+) -> Result<(), MigrateError> {
+    if staged.join(ARCHIVE_CONFIG).is_file() && !manifest.hashes.contains_key(ARCHIVE_CONFIG) {
+        return Err(MigrateError::HashMismatch);
+    }
+    if staged.join(ARCHIVE_SQLITE).is_file() && !manifest.hashes.contains_key(ARCHIVE_SQLITE) {
+        return Err(MigrateError::HashMismatch);
+    }
+    if staged.join(ARCHIVE_MATERIALS).is_dir() {
+        for key in collect_material_keys(&staged.join(ARCHIVE_MATERIALS))? {
+            if !manifest.hashes.contains_key(&key) {
+                return Err(MigrateError::HashMismatch);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_material_keys(root: &Path) -> Result<Vec<String>, MigrateError> {
+    let mut keys = Vec::new();
+    collect_material_keys_into(root, root, &mut keys)?;
+    Ok(keys)
+}
+
+fn collect_material_keys_into(
+    root: &Path,
+    current: &Path,
+    keys: &mut Vec<String>,
+) -> Result<(), MigrateError> {
+    for entry in fs::read_dir(current).map_err(|_| MigrateError::Operation)? {
+        let entry = entry.map_err(|_| MigrateError::Operation)?;
+        let file_type = entry.file_type().map_err(|_| MigrateError::Operation)?;
+        if file_type.is_dir() {
+            collect_material_keys_into(root, &entry.path(), keys)?;
+        } else if file_type.is_file() {
+            keys.push(format!(
+                "{ARCHIVE_MATERIALS}/{}",
+                relative_key(root, &entry.path())?
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn dest_already_applied(dest: &Path) -> bool {
+    if dest.join(MIGRATED_FROM).is_file() {
+        return true;
+    }
+    let sqlite = dest.join(DEST_SQLITE);
+    sqlite.is_file() && sqlite_has_user_schema(&sqlite)
+}
+
+fn sqlite_has_user_schema(path: &Path) -> bool {
+    let Ok(connection) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        return true;
+    };
+    let Ok(count) = connection.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        [],
+        |row| row.get::<_, i64>(0),
+    ) else {
+        return true;
+    };
+    count > 0
+}
+
+fn dest_file_list(archive_files: &[String]) -> Vec<String> {
+    let mut files = archive_files
+        .iter()
+        .map(|name| dest_name(name))
+        .collect::<Vec<_>>();
+    files.sort();
+    files.dedup();
+    files
+}
+
+fn dest_artifact_names(archive_files: &[String]) -> Vec<String> {
+    let mut names = Vec::new();
+    if archive_files.iter().any(|name| name == ARCHIVE_CONFIG) {
+        names.push(ARCHIVE_CONFIG.to_owned());
+    }
+    if archive_files.iter().any(|name| name == ARCHIVE_SQLITE) {
+        names.push(DEST_SQLITE.to_owned());
+    }
+    if archive_files
+        .iter()
+        .any(|name| name == ARCHIVE_MATERIALS || name.starts_with("materials/"))
+    {
+        names.push(ARCHIVE_MATERIALS.to_owned());
+    }
+    names
+}
+
+fn dest_name(archive_key: &str) -> String {
+    if archive_key == ARCHIVE_SQLITE {
+        DEST_SQLITE.to_owned()
+    } else {
+        archive_key.to_owned()
+    }
+}
+
+fn write_migrated_from_marker(
+    path: &Path,
+    archive: &Path,
+    omitted: &[String],
+) -> Result<(), MigrateError> {
+    let marker = MigratedFromMarker {
+        archive_path: archive.to_string_lossy().into_owned(),
+        utc: Utc::now().to_rfc3339(),
+        omitted: omitted.to_vec(),
+    };
+    let bytes = serde_json::to_vec_pretty(&marker).map_err(|_| MigrateError::Operation)?;
+    reject_secret_bytes(&bytes).map_err(map_backup)?;
+    fs::write(path, bytes).map_err(|_| MigrateError::Operation)
+}
+
+fn place_item(from: &Path, to: &Path, previous_root: &Path) -> Result<(), MigrateError> {
+    if !from.exists() {
+        return Err(MigrateError::Operation);
+    }
+    if to.exists() {
+        fs::create_dir_all(previous_root).map_err(|_| MigrateError::Operation)?;
+        let backup = previous_root.join(to.file_name().ok_or(MigrateError::Operation)?);
+        remove_path_if_exists(&backup)?;
+        fs::rename(to, &backup).map_err(|_| MigrateError::Operation)?;
+    }
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent).map_err(|_| MigrateError::Operation)?;
+    }
+    if fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    if from.is_dir() {
+        copy_tree(from, to)?;
+        let _ = fs::remove_dir_all(from);
+    } else {
+        fs::copy(from, to).map_err(|_| MigrateError::Operation)?;
+        let _ = fs::remove_file(from);
+    }
+    Ok(())
+}
+
+fn restore_item(dest: &Path, name: &str, previous_root: &Path) {
+    let live = dest.join(name);
+    let backup = previous_root.join(name);
+    let _ = remove_path_if_exists(&live);
+    if backup.exists() {
+        let _ = fs::rename(&backup, &live);
+    }
+}
+
+fn copy_tree(from: &Path, to: &Path) -> Result<(), MigrateError> {
+    fs::create_dir_all(to).map_err(|_| MigrateError::Operation)?;
+    for entry in fs::read_dir(from).map_err(|_| MigrateError::Operation)? {
+        let entry = entry.map_err(|_| MigrateError::Operation)?;
+        let destination = to.join(entry.file_name());
+        let file_type = entry.file_type().map_err(|_| MigrateError::Operation)?;
+        if file_type.is_dir() {
+            copy_tree(&entry.path(), &destination)?;
+        } else if file_type.is_file() {
+            fs::copy(entry.path(), destination).map_err(|_| MigrateError::Operation)?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_path_if_exists(path: &Path) -> Result<(), MigrateError> {
+    if path.is_dir() {
+        fs::remove_dir_all(path).map_err(|_| MigrateError::Operation)?;
+    } else if path.is_file() {
+        fs::remove_file(path).map_err(|_| MigrateError::Operation)?;
+    }
+    Ok(())
+}
+
+fn stage_archive_copy(archive: &Path) -> Result<StagingDir, MigrateError> {
+    let staged = std::env::temp_dir().join(format!("legacy-verify-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&staged).map_err(|_| MigrateError::Operation)?;
+    let staged = StagingDir(staged);
+    let manifest = archive.join(ARCHIVE_MANIFEST);
+    if !manifest.is_file() {
+        return Err(MigrateError::Operation);
+    }
+    fs::copy(&manifest, staged.as_path().join(ARCHIVE_MANIFEST))
+        .map_err(|_| MigrateError::Operation)?;
+    if archive.join(ARCHIVE_CONFIG).is_file() {
+        fs::copy(
+            archive.join(ARCHIVE_CONFIG),
+            staged.as_path().join(ARCHIVE_CONFIG),
+        )
+        .map_err(|_| MigrateError::Operation)?;
+    }
+    if archive.join(ARCHIVE_SQLITE).is_file() {
+        fs::copy(
+            archive.join(ARCHIVE_SQLITE),
+            staged.as_path().join(ARCHIVE_SQLITE),
+        )
+        .map_err(|_| MigrateError::Operation)?;
+    }
+    if archive.join(ARCHIVE_MATERIALS).is_dir() {
+        copy_tree(
+            &archive.join(ARCHIVE_MATERIALS),
+            &staged.as_path().join(ARCHIVE_MATERIALS),
+        )?;
+    }
+    make_tree_writable(staged.as_path())?;
+    Ok(staged)
+}
+
+struct StagingDir(PathBuf);
+
+impl StagingDir {
+    fn as_path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for StagingDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MigratedFromMarker {
+    archive_path: String,
+    utc: String,
+    omitted: Vec<String>,
 }
 
 fn detect_repository(repository: &Path) -> Option<LegacyRoot> {
@@ -461,6 +848,31 @@ fn make_tree_readonly(root: &Path) -> Result<(), MigrateError> {
     for entry in fs::read_dir(root).map_err(|_| MigrateError::Operation)? {
         let entry = entry.map_err(|_| MigrateError::Operation)?;
         make_tree_readonly(&entry.path())?;
+    }
+    Ok(())
+}
+
+fn make_tree_writable(root: &Path) -> Result<(), MigrateError> {
+    if root.is_file() {
+        return make_writable(root);
+    }
+    if !root.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(root).map_err(|_| MigrateError::Operation)? {
+        let entry = entry.map_err(|_| MigrateError::Operation)?;
+        make_tree_writable(&entry.path())?;
+    }
+    make_writable(root)
+}
+
+fn make_writable(path: &Path) -> Result<(), MigrateError> {
+    let mut permissions = fs::metadata(path)
+        .map_err(|_| MigrateError::Operation)?
+        .permissions();
+    if permissions.readonly() {
+        permissions.set_readonly(false);
+        fs::set_permissions(path, permissions).map_err(|_| MigrateError::Operation)?;
     }
     Ok(())
 }

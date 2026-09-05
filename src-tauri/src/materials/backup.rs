@@ -125,7 +125,7 @@ impl<'a> BackupService<'a> {
     }
 }
 
-fn require_integrity(database: &Database) -> Result<(), BackupError> {
+pub(crate) fn require_integrity(database: &Database) -> Result<(), BackupError> {
     let check = database
         .integrity_check()
         .map_err(|_| BackupError::Integrity)?;
@@ -222,13 +222,30 @@ fn verify_hashes(archive: &Path, manifest: &BackupManifest) -> Result<(), Backup
     if current != manifest.hashes {
         return Err(BackupError::HashMismatch);
     }
-    for (key, expected) in &manifest.hashes {
-        let actual = file_sha256(&archive.join(key))?;
+    verify_file_hashes(archive, &manifest.hashes)
+}
+
+pub(crate) fn verify_file_hashes(
+    root: &Path,
+    hashes: &BTreeMap<String, String>,
+) -> Result<(), BackupError> {
+    for (key, expected) in hashes {
+        let path = join_archive_key(root, key);
+        if !path.is_file() {
+            return Err(BackupError::HashMismatch);
+        }
+        let actual = file_sha256(&path)?;
         if actual != *expected {
             return Err(BackupError::HashMismatch);
         }
     }
     Ok(())
+}
+
+fn join_archive_key(root: &Path, key: &str) -> PathBuf {
+    key.split('/')
+        .filter(|part| !part.is_empty())
+        .fold(root.to_path_buf(), |acc, part| acc.join(part))
 }
 
 fn confirm_material_files(database: &Database, archive: &Path) -> Result<(), BackupError> {

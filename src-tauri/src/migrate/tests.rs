@@ -5,6 +5,7 @@ use rusqlite::{Connection, OpenFlags};
 
 use super::{
     LegacyKind, LegacySearchRoot, backup_legacy, backup_legacy_into_app_data, detect_legacy_roots,
+    switch_legacy_archive, verify_legacy_archive,
 };
 
 const SECRET_DECOY: &str = "sk-live-migrate-forbidden-key";
@@ -390,4 +391,309 @@ fn versioned_backup_is_readonly_under_backups_legacy_stamp() {
             .readonly()
     );
     allow_cleanup(app_data.path());
+}
+
+fn file_hash(path: &Path) -> String {
+    crate::materials::backup::file_sha256(path).unwrap()
+}
+
+fn write_legacy_manifest(archive: &Path, hashes: &[(&str, String)], omitted: &[&str]) {
+    let mut map = serde_json::Map::new();
+    for (key, hash) in hashes {
+        map.insert((*key).to_owned(), serde_json::Value::String(hash.clone()));
+    }
+    write(
+        &archive.join("manifest.json"),
+        &serde_json::json!({
+            "schemaVersion": 1,
+            "kind": "legacy",
+            "hashes": map,
+            "omitted": omitted,
+        })
+        .to_string(),
+    );
+}
+
+fn snapshot_tree(root: &Path) -> Vec<(String, Vec<u8>, bool)> {
+    let mut entries = Vec::new();
+    snapshot_tree_into(root, root, &mut entries);
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    entries
+}
+
+fn snapshot_tree_into(root: &Path, current: &Path, entries: &mut Vec<(String, Vec<u8>, bool)>) {
+    if current.is_file() {
+        let relative = current
+            .strip_prefix(root)
+            .unwrap_or(current)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let readonly = fs::metadata(current).unwrap().permissions().readonly();
+        entries.push((relative, fs::read(current).unwrap(), readonly));
+        return;
+    }
+    if !current.is_dir() {
+        return;
+    }
+    let mut children = fs::read_dir(current)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    children.sort();
+    for child in children {
+        snapshot_tree_into(root, &child, entries);
+    }
+}
+
+#[test]
+fn verify_accepts_readonly_task1_archive_on_temp_copy() {
+    let repo = tempfile::tempdir().unwrap();
+    write(&repo.path().join("config/local.json"), SAFE_CONFIG);
+    write_ok_sqlite(&repo.path().join("data/app.sqlite"));
+    write(
+        &repo.path().join("data/materials/resume.md"),
+        "工作经历\n2019.03-2021.06 负责订单服务。",
+    );
+    let root = detect_legacy_roots(&[LegacySearchRoot::Repository(repo.path().to_path_buf())])
+        .into_iter()
+        .next()
+        .unwrap();
+    let archive = tempfile::tempdir().unwrap();
+    let backup = backup_legacy(&root, archive.path()).unwrap();
+    let before = snapshot_tree(archive.path());
+    let source_before = snapshot_tree(repo.path());
+
+    let verified = verify_legacy_archive(archive.path()).unwrap();
+
+    assert_eq!(verified.archive_path, archive.path());
+    assert!(verified.files.contains(&"config.json".into()));
+    assert!(verified.files.contains(&"app.sqlite".into()));
+    assert!(
+        verified
+            .files
+            .iter()
+            .any(|name| name == "materials/resume.md")
+    );
+    assert_eq!(verified.omitted, backup.omitted);
+    assert_eq!(snapshot_tree(archive.path()), before);
+    assert_eq!(snapshot_tree(repo.path()), source_before);
+    assert!(!archive.path().join("app.sqlite-wal").exists());
+    assert!(!archive.path().join("app.sqlite-shm").exists());
+    allow_cleanup(archive.path());
+}
+
+#[test]
+fn verify_allows_missing_config_and_sqlite() {
+    let archive = tempfile::tempdir().unwrap();
+    write_legacy_manifest(archive.path(), &[], &[]);
+
+    let verified = verify_legacy_archive(archive.path()).unwrap();
+
+    assert!(verified.files.is_empty());
+    assert!(verified.omitted.is_empty());
+}
+
+#[test]
+fn verify_rejects_hash_mismatch_integrity_failure_and_secret_bytes() {
+    let mismatched = tempfile::tempdir().unwrap();
+    write(&mismatched.path().join("config.json"), SAFE_CONFIG);
+    write_legacy_manifest(
+        mismatched.path(),
+        &[(
+            "config.json",
+            "0000000000000000000000000000000000000000000000000000000000000000".into(),
+        )],
+        &[],
+    );
+    assert_eq!(
+        verify_legacy_archive(mismatched.path()).unwrap_err().code(),
+        "MIGRATE_HASH_MISMATCH"
+    );
+
+    let corrupt = tempfile::tempdir().unwrap();
+    write_bytes(&corrupt.path().join("app.sqlite"), b"not-a-sqlite-database");
+    write_legacy_manifest(
+        corrupt.path(),
+        &[("app.sqlite", file_hash(&corrupt.path().join("app.sqlite")))],
+        &[],
+    );
+    assert_eq!(
+        verify_legacy_archive(corrupt.path()).unwrap_err().code(),
+        "MIGRATE_INTEGRITY_FAILED"
+    );
+
+    let secrets = tempfile::tempdir().unwrap();
+    write(
+        &secrets.path().join("config.json"),
+        &format!(r#"{{"note":"{SECRET_DECOY}"}}"#),
+    );
+    write_legacy_manifest(
+        secrets.path(),
+        &[(
+            "config.json",
+            file_hash(&secrets.path().join("config.json")),
+        )],
+        &[],
+    );
+    assert_eq!(
+        verify_legacy_archive(secrets.path()).unwrap_err().code(),
+        "MIGRATE_SECRET_FORBIDDEN"
+    );
+}
+
+#[test]
+fn switch_copies_verified_tree_into_tauri_layout() {
+    let repo = tempfile::tempdir().unwrap();
+    write(&repo.path().join("config/local.json"), SAFE_CONFIG);
+    write_ok_sqlite(&repo.path().join("data/app.sqlite"));
+    write(
+        &repo.path().join("data/materials/resume.md"),
+        "工作经历\n2019.03-2021.06 负责订单服务。",
+    );
+    let root = detect_legacy_roots(&[LegacySearchRoot::Repository(repo.path().to_path_buf())])
+        .into_iter()
+        .next()
+        .unwrap();
+    let archive = tempfile::tempdir().unwrap();
+    backup_legacy(&root, archive.path()).unwrap();
+    let source_before = snapshot_tree(repo.path());
+    let archive_before = snapshot_tree(archive.path());
+    let dest = tempfile::tempdir().unwrap();
+
+    let report = switch_legacy_archive(archive.path(), dest.path()).unwrap();
+
+    assert_eq!(report.dest_data_dir, dest.path());
+    assert!(report.files.contains(&"config.json".into()));
+    assert!(report.files.contains(&"app.sqlite3".into()));
+    assert!(
+        report
+            .files
+            .iter()
+            .any(|name| name == "materials/resume.md")
+    );
+    assert!(!report.files.iter().any(|name| name == "app.sqlite"));
+    assert!(dest.path().join("config.json").is_file());
+    assert!(dest.path().join("app.sqlite3").is_file());
+    assert!(!dest.path().join("app.sqlite").exists());
+    assert!(dest.path().join("materials/resume.md").is_file());
+    assert_eq!(report.marker_path, dest.path().join("migrated-from"));
+    let marker_json = fs::read_to_string(&report.marker_path).unwrap();
+    assert!(
+        !contains_secret_material(&marker_json),
+        "migrated-from leaked secret material: {marker_json}"
+    );
+    let marker: serde_json::Value = serde_json::from_str(&marker_json).unwrap();
+    assert_eq!(
+        marker["archivePath"].as_str(),
+        Some(archive.path().to_string_lossy().as_ref())
+    );
+    assert!(marker["utc"].as_str().is_some_and(|utc| !utc.is_empty()));
+    assert_eq!(marker["omitted"], serde_json::json!([]));
+    assert_eq!(
+        Connection::open_with_flags(
+            dest.path().join("app.sqlite3"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap()
+        .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+        .unwrap(),
+        "ok"
+    );
+    assert_eq!(snapshot_tree(repo.path()), source_before);
+    assert_eq!(snapshot_tree(archive.path()), archive_before);
+    allow_cleanup(archive.path());
+}
+
+#[test]
+fn switch_does_not_overwrite_existing_marker_or_live_schema() {
+    let repo = tempfile::tempdir().unwrap();
+    write(&repo.path().join("config/local.json"), SAFE_CONFIG);
+    write_ok_sqlite(&repo.path().join("data/app.sqlite"));
+    let root = detect_legacy_roots(&[LegacySearchRoot::Repository(repo.path().to_path_buf())])
+        .into_iter()
+        .next()
+        .unwrap();
+    let archive = tempfile::tempdir().unwrap();
+    backup_legacy(&root, archive.path()).unwrap();
+    let dest = tempfile::tempdir().unwrap();
+    let first = switch_legacy_archive(archive.path(), dest.path()).unwrap();
+    fs::write(dest.path().join("config.json"), r#"{"touched":true}"#).unwrap();
+    let after_first = snapshot_tree(dest.path());
+
+    assert_eq!(
+        switch_legacy_archive(archive.path(), dest.path())
+            .unwrap_err()
+            .code(),
+        "MIGRATE_ALREADY_APPLIED"
+    );
+    assert_eq!(snapshot_tree(dest.path()), after_first);
+    assert_eq!(
+        fs::read_to_string(dest.path().join("config.json")).unwrap(),
+        r#"{"touched":true}"#
+    );
+    assert_eq!(first.marker_path, dest.path().join("migrated-from"));
+
+    let occupied = tempfile::tempdir().unwrap();
+    write_ok_sqlite(&occupied.path().join("app.sqlite3"));
+    write(&occupied.path().join("keep.txt"), "untouched");
+    assert_eq!(
+        switch_legacy_archive(archive.path(), occupied.path())
+            .unwrap_err()
+            .code(),
+        "MIGRATE_ALREADY_APPLIED"
+    );
+    assert!(!occupied.path().join("migrated-from").exists());
+    assert!(!occupied.path().join("config.json").exists());
+    assert_eq!(
+        fs::read_to_string(occupied.path().join("keep.txt")).unwrap(),
+        "untouched"
+    );
+    allow_cleanup(archive.path());
+}
+
+#[test]
+fn switch_leaves_dest_unchanged_when_verify_or_copy_fails() {
+    let bad = tempfile::tempdir().unwrap();
+    write(&bad.path().join("config.json"), SAFE_CONFIG);
+    write_legacy_manifest(
+        bad.path(),
+        &[(
+            "config.json",
+            "0000000000000000000000000000000000000000000000000000000000000000".into(),
+        )],
+        &[],
+    );
+    let dest = tempfile::tempdir().unwrap();
+    write(&dest.path().join("keep.txt"), "sentinel");
+
+    assert_eq!(
+        switch_legacy_archive(bad.path(), dest.path())
+            .unwrap_err()
+            .code(),
+        "MIGRATE_HASH_MISMATCH"
+    );
+    assert_eq!(
+        fs::read_to_string(dest.path().join("keep.txt")).unwrap(),
+        "sentinel"
+    );
+    assert!(!dest.path().join("migrated-from").exists());
+    assert!(!dest.path().join("config.json").exists());
+    assert!(!dest.path().join("app.sqlite3").exists());
+
+    let repo = tempfile::tempdir().unwrap();
+    write(&repo.path().join("config/local.json"), SAFE_CONFIG);
+    let root = detect_legacy_roots(&[LegacySearchRoot::Repository(repo.path().to_path_buf())])
+        .into_iter()
+        .next()
+        .unwrap();
+    let archive = tempfile::tempdir().unwrap();
+    backup_legacy(&root, archive.path()).unwrap();
+    let blocked = tempfile::NamedTempFile::new().unwrap();
+    let blocked_path = blocked.path().to_path_buf();
+    fs::write(&blocked_path, b"not-a-directory").unwrap();
+
+    assert!(switch_legacy_archive(archive.path(), &blocked_path).is_err());
+    assert!(blocked_path.is_file());
+    assert_eq!(fs::read(&blocked_path).unwrap(), b"not-a-directory");
+    allow_cleanup(archive.path());
 }
