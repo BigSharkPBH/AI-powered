@@ -10,6 +10,8 @@ export type DiagnosticsExportResult = { exported: boolean, };
 
 export type StartupState = { "kind": "ready" } | { "kind": "migrated" } | { "kind": "recoverable", error: PublicError, } | { "kind": "invalid", error: PublicError, };
 
+export type LegacyMigrationStatus = { applied: boolean, reenterSecrets: boolean, omitted: Array<string>, };
+
 export type SecretSlot = { reference: string, configured: boolean, };
 
 export type ApplicationConfig = { locale: string | null, };

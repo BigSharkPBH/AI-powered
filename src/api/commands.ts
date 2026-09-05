@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-import type { AgentCommandInput, AgentCommandResult, CommandResult, DiagnosticsExportResult, EmbeddingConfig, EmbeddingConfigSaveInput, EmbeddingTestResult, FoundationStatus, LiveKitConfig, LiveKitJoinToken, LiveKitSettingsSaveInput, LiveKitTestResult, MaterialSearchHit, MaterialSummary, ModelDiscoveryResult, ProviderConfig, ProviderSaveInput, ProviderTestResult, PublicConfig, RoleProfileConfig, RoleProfileCopyInput, RoleProfileSaveInput, RuntimeStatus, SessionDetail, SessionExportResult, SessionStartResult, SessionSummary, SessionTurnView, StartupState, VoiceRouteConfig, VoiceRouteSaveInput, VoiceRouteTestResult } from "../generated/bindings";
+import type { AgentCommandInput, AgentCommandResult, CommandResult, DiagnosticsExportResult, EmbeddingConfig, EmbeddingConfigSaveInput, EmbeddingTestResult, FoundationStatus, LegacyMigrationStatus, LiveKitConfig, LiveKitJoinToken, LiveKitSettingsSaveInput, LiveKitTestResult, MaterialSearchHit, MaterialSummary, ModelDiscoveryResult, ProviderConfig, ProviderSaveInput, ProviderTestResult, PublicConfig, RoleProfileConfig, RoleProfileCopyInput, RoleProfileSaveInput, RuntimeStatus, SessionDetail, SessionExportResult, SessionStartResult, SessionSummary, SessionTurnView, StartupState, VoiceRouteConfig, VoiceRouteSaveInput, VoiceRouteTestResult } from "../generated/bindings";
 
 export function getFoundationStatus() {
   return invoke<CommandResult<FoundationStatus>>("foundation_get_status");
@@ -12,6 +12,10 @@ export function exportDiagnostics(destination: string) {
 
 export function getStartupState() {
   return invoke<CommandResult<StartupState>>("config_get_startup_state");
+}
+
+export function getLegacyMigrationStatus() {
+  return invoke<CommandResult<LegacyMigrationStatus>>("legacy_migration_status");
 }
 
 export function getConfigPublic() {

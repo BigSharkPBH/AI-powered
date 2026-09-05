@@ -3,12 +3,15 @@ use std::{
     sync::{Arc, Mutex, RwLock, atomic::AtomicU64},
 };
 
+use chrono::Utc;
+
 use crate::{
     config::{ConfigLoadOutcome, ConfigStore},
     contracts::StartupState,
     database::{Database, DatabaseError},
-    diagnostics::{DiagnosticError, DiagnosticWriter},
+    diagnostics::{DiagnosticError, DiagnosticEvent, DiagnosticWriter},
     error::PublicError,
+    migrate::{self, LegacySearchRoot},
     secrets::{SecretService, SecretStore, WindowsSecretStore},
     services::{SessionControl, SessionService},
     sessions::SessionStore,
@@ -19,6 +22,7 @@ pub struct AppPaths {
     pub data_directory: PathBuf,
     pub logs_directory: PathBuf,
     pub config_path: PathBuf,
+    pub legacy_search_roots: Vec<LegacySearchRoot>,
 }
 
 pub struct AppState {
@@ -53,6 +57,26 @@ impl AppState {
     ) -> Result<Self, AppStateError> {
         std::fs::create_dir_all(&paths.data_directory).map_err(|_| DiagnosticError::Operation)?;
         let diagnostics = DiagnosticWriter::new(paths.logs_directory.clone())?;
+        if let Err(error) = migrate::try_first_run_legacy_migration(
+            &paths.data_directory,
+            &paths.legacy_search_roots,
+            &paths.data_directory,
+            Utc::now(),
+        ) {
+            let _ = diagnostics.record(&DiagnosticEvent {
+                timestamp: Utc::now(),
+                level: "warn".into(),
+                area: "migrate".into(),
+                code: error.code().to_owned(),
+                request_id: "legacy-first-run".into(),
+                session_id: None,
+                snapshot_id: None,
+                provider_id: None,
+                duration_ms: None,
+                retry_count: None,
+            });
+        }
+        adopt_switched_config(&paths);
         let secrets =
             SecretService::new("default", secret_store).expect("static namespace is valid");
         let secret_backend_ready = secrets.status("system/startup-probe").is_ok();
@@ -156,6 +180,16 @@ impl AppState {
     }
 }
 
+fn adopt_switched_config(paths: &AppPaths) {
+    let switched = paths.data_directory.join("config.json");
+    if switched.is_file() && !paths.config_path.exists() {
+        if let Some(parent) = paths.config_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::copy(&switched, &paths.config_path);
+    }
+}
+
 fn open_and_recover(path: &std::path::Path) -> Result<Database, DatabaseError> {
     let database = Database::open(path)?;
     database.migrate()?;
@@ -194,6 +228,7 @@ mod tests {
             data_directory: directory.path().join("data"),
             logs_directory: directory.path().join("logs"),
             config_path: directory.path().join("config.json"),
+            legacy_search_roots: Vec::new(),
         }
     }
 
@@ -295,5 +330,68 @@ mod tests {
         assert!(
             matches!(state.startup_state(), StartupState::Invalid { ref error } if error.code == "SECRET_BACKEND_UNAVAILABLE")
         );
+    }
+
+    #[test]
+    fn initialize_is_noop_without_legacy_and_creates_sqlite_after() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = app_paths(&directory);
+        std::fs::write(&paths.config_path, r#"{"configVersion":1}"#).unwrap();
+        let state = initialize(paths.clone());
+        assert!(!paths.data_directory.join("migrated-from").exists());
+        assert!(paths.data_directory.join("app.sqlite3").is_file());
+        assert!(matches!(state.startup_state(), StartupState::Ready));
+    }
+
+    #[test]
+    fn initialize_switches_legacy_before_creating_sqlite() {
+        let directory = tempfile::tempdir().unwrap();
+        let repo = directory.path().join("legacy-repo");
+        std::fs::create_dir_all(repo.join("config")).unwrap();
+        std::fs::write(repo.join("config/local.json"), r#"{"configVersion":1}"#).unwrap();
+        let mut paths = app_paths(&directory);
+        paths.legacy_search_roots = vec![crate::migrate::LegacySearchRoot::Repository(repo)];
+        assert!(!paths.data_directory.join("app.sqlite3").exists());
+
+        let state = initialize(paths.clone());
+
+        assert!(
+            paths.data_directory.join("migrated-from").is_file(),
+            "switch must run before AppState creates a live schema"
+        );
+        assert!(paths.data_directory.join("app.sqlite3").is_file());
+        assert!(matches!(
+            state.startup_state(),
+            StartupState::Ready | StartupState::Migrated
+        ));
+        let status = crate::migrate::legacy_migration_status(&paths.data_directory, false);
+        assert!(status.applied);
+        assert!(status.reenter_secrets);
+        let encoded = serde_json::to_string(&status).unwrap();
+        for needle in ["password", "sk-live", "secretvalue", "control_api_token"] {
+            assert!(
+                !encoded.to_ascii_lowercase().contains(needle),
+                "status leaked {needle}: {encoded}"
+            );
+        }
+    }
+
+    #[test]
+    fn initialize_continues_empty_when_legacy_first_run_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut paths = app_paths(&directory);
+        std::fs::write(&paths.config_path, r#"{"configVersion":1}"#).unwrap();
+        std::fs::create_dir_all(&paths.data_directory).unwrap();
+        std::fs::write(paths.data_directory.join("backups"), b"not-a-directory").unwrap();
+        let repo = directory.path().join("legacy-repo");
+        std::fs::create_dir_all(repo.join("config")).unwrap();
+        std::fs::write(repo.join("config/local.json"), r#"{"configVersion":1}"#).unwrap();
+        paths.legacy_search_roots = vec![crate::migrate::LegacySearchRoot::Repository(repo)];
+
+        let state = initialize(paths.clone());
+
+        assert!(!paths.data_directory.join("migrated-from").exists());
+        assert!(paths.data_directory.join("app.sqlite3").is_file());
+        assert!(matches!(state.startup_state(), StartupState::Ready));
     }
 }

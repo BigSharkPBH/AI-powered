@@ -6,6 +6,7 @@ import { SettingsPage } from "./settings-page";
 
 vi.mock("../../api/commands", () => ({
   getConfigPublic: vi.fn(),
+  getLegacyMigrationStatus: vi.fn(),
   saveRoleProfile: vi.fn(),
   copyRoleProfile: vi.fn(),
   activateRoleProfile: vi.fn(),
@@ -14,6 +15,10 @@ vi.mock("../../api/commands", () => ({
 
 describe("SettingsPage", () => {
   beforeEach(() => {
+    vi.mocked(commands.getLegacyMigrationStatus).mockResolvedValue({
+      ok: true,
+      data: { applied: false, reenterSecrets: false, omitted: [] },
+    });
     vi.mocked(commands.getConfigPublic).mockResolvedValue({
       ok: true,
       data: {
@@ -63,5 +68,25 @@ describe("SettingsPage", () => {
   it("includes the role editor", async () => {
     render(<SettingsPage />);
     expect(await screen.findByRole("heading", { name: "角色" })).toBeTruthy();
+  });
+
+  it("shows 需要重新填写密钥 when migration status asks to reenter secrets", async () => {
+    vi.mocked(commands.getLegacyMigrationStatus).mockResolvedValue({
+      ok: true,
+      data: { applied: true, reenterSecrets: true, omitted: [] },
+    });
+    render(<SettingsPage />);
+    const banner = await screen.findByText("需要重新填写密钥");
+    expect(banner.textContent).toContain("需要重新填写密钥");
+  });
+
+  it("hides the reenter banner when secrets are already configured", async () => {
+    vi.mocked(commands.getLegacyMigrationStatus).mockResolvedValue({
+      ok: true,
+      data: { applied: true, reenterSecrets: false, omitted: [] },
+    });
+    render(<SettingsPage />);
+    await screen.findByRole("heading", { name: "角色" });
+    expect(screen.queryByText("需要重新填写密钥")).toBeNull();
   });
 });

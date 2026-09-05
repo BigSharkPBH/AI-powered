@@ -4,6 +4,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Shell } from "./shell";
 
 vi.mock("../api/commands", () => ({
+  getLegacyMigrationStatus: vi.fn().mockResolvedValue({
+    ok: true,
+    data: { applied: false, reenterSecrets: false, omitted: [] },
+  }),
   getConfigPublic: vi.fn().mockResolvedValue({
     ok: true,
     data: {

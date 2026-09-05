@@ -21,6 +21,7 @@ use serde::{Serialize, Serializer, ser::SerializeMap};
 use ts_rs::TS;
 
 pub use crate::error::PublicError;
+pub use crate::migrate::LegacyMigrationStatus;
 pub use crate::runtime::PreflightIssue;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -246,6 +247,7 @@ fn generated_bindings() -> String {
         SecretStatus::decl(&config),
         DiagnosticsExportResult::decl(&config),
         StartupState::decl(&config),
+        crate::migrate::LegacyMigrationStatus::decl(&config),
         // Config contract DTOs (Phase 3 Stage B): the redacted public
         // configuration tree. Providers only carry SecretSlot references; no
         // secret value is ever part of this contract.
@@ -353,6 +355,8 @@ mod tests {
         assert!(bindings.contains("export type SecretStatus"));
         assert!(bindings.contains("export type DiagnosticsExportResult"));
         assert!(bindings.contains("export type StartupState"));
+        assert!(bindings.contains("export type LegacyMigrationStatus"));
+        assert!(bindings.contains("reenterSecrets"));
         assert!(bindings.contains("export type PublicConfig"));
         assert!(bindings.contains("export type VoiceRouteMode"));
         assert!(bindings.contains("export type VoiceRouteConfig"));

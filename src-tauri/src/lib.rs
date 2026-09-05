@@ -51,6 +51,7 @@ pub fn run() {
             commands::foundation_get_status,
             commands::diagnostics_export,
             commands::config_get_startup_state,
+            commands::legacy_migration_status,
             commands::config_get_public,
             commands::model_provider_save,
             commands::model_provider_test,
@@ -94,25 +95,30 @@ pub fn run() {
         .setup(|app| {
             let data_directory = app.path().app_data_dir()?;
             let config_root = app.path().config_dir()?;
+            let config_dirs = config::ConfigDirs {
+                repository: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .expect("manifest has parent")
+                    .to_path_buf(),
+                roaming_app_data: config_root,
+            };
             let config_location = config::locate_config(
                 &std::env::args_os().collect::<Vec<_>>(),
                 &std::env::vars_os()
                     .filter(|(key, _)| key == "AI_VIRTUAL_ASSISTANT_CONFIG")
                     .filter_map(|(key, value)| key.into_string().ok().map(|key| (key, value)))
                     .collect(),
-                &config::ConfigDirs {
-                    repository: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                        .parent()
-                        .expect("manifest has parent")
-                        .to_path_buf(),
-                    roaming_app_data: config_root,
-                },
+                &config_dirs,
                 cfg!(debug_assertions),
             )?;
             app.manage(app_state::AppState::production(app_state::AppPaths {
                 logs_directory: data_directory.join("logs"),
                 config_path: config_location.path,
                 data_directory,
+                legacy_search_roots: migrate::legacy_search_roots(
+                    &config_dirs,
+                    cfg!(debug_assertions),
+                ),
             })?);
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("AI Virtual Assistant")

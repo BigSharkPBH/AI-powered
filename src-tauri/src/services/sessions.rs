@@ -1991,6 +1991,7 @@ mod tests {
             data_directory: directory.path().join("data"),
             logs_directory: directory.path().join("logs"),
             config_path: directory.path().join("config.json"),
+            legacy_search_roots: Vec::new(),
         };
         std::fs::write(&paths.config_path, r#"{"configVersion":1}"#).unwrap();
         std::fs::create_dir_all(&paths.data_directory).unwrap();

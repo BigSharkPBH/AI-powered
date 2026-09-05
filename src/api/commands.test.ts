@@ -19,6 +19,7 @@ import {
   issueLiveKitJoinToken,
   startSession,
   getConfigPublic,
+  getLegacyMigrationStatus,
   importMaterial,
   listMaterials,
   saveEmbeddingConfig,
@@ -36,6 +37,23 @@ import {
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 const invokeMock = vi.mocked(invoke);
+
+describe("legacy migration adapter", () => {
+  it("invokes legacy_migration_status with no arguments", async () => {
+    invokeMock.mockResolvedValue({
+      ok: true,
+      data: { applied: true, reenterSecrets: true, omitted: [] },
+    });
+
+    const result = await getLegacyMigrationStatus();
+
+    expect(invokeMock).toHaveBeenCalledWith("legacy_migration_status");
+    expect(result).toEqual({
+      ok: true,
+      data: { applied: true, reenterSecrets: true, omitted: [] },
+    });
+  });
+});
 
 describe("getConfigPublic adapter", () => {
   it("invokes config_get_public with no arguments", async () => {

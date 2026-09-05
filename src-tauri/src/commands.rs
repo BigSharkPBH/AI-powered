@@ -10,9 +10,9 @@ use crate::{
     },
     contracts::{
         AgentCommandInput, AgentCommandResult, AudioLevelEvent, CommandResult,
-        DiagnosticsExportResult, FoundationStatus, RuntimeStatus, SessionCitationView,
-        SessionDetail, SessionExportResult, SessionReplyEvent, SessionStartResult, SessionSummary,
-        SessionTranscriptEvent, SessionTurnView, StartupState,
+        DiagnosticsExportResult, FoundationStatus, LegacyMigrationStatus, RuntimeStatus,
+        SessionCitationView, SessionDetail, SessionExportResult, SessionReplyEvent,
+        SessionStartResult, SessionSummary, SessionTranscriptEvent, SessionTurnView, StartupState,
     },
     error::PublicError,
     providers::{
@@ -101,6 +101,21 @@ pub fn config_get_startup_state(state: State<'_, AppState>) -> CommandResult<Sta
     CommandResult::Ok {
         data: state.startup_state(),
     }
+}
+
+fn legacy_migration_status_cmd(state: &AppState) -> CommandResult<LegacyMigrationStatus> {
+    let configured = match state.config.load() {
+        Ok(config) => crate::migrate::secret_slots_configured(&config),
+        Err(_) => false,
+    };
+    CommandResult::Ok {
+        data: crate::migrate::legacy_migration_status(&state.paths.data_directory, configured),
+    }
+}
+
+#[tauri::command]
+pub fn legacy_migration_status(state: State<'_, AppState>) -> CommandResult<LegacyMigrationStatus> {
+    legacy_migration_status_cmd(&state)
 }
 
 /// Thin, read-only projection of the loaded configuration onto its redacted
@@ -1741,12 +1756,93 @@ mod tests {
     };
 
     #[test]
+    fn legacy_migration_status_flags_reenter_without_secret_material() {
+        let directory = tempfile::tempdir().unwrap();
+        let repo = directory.path().join("legacy-repo");
+        std::fs::create_dir_all(repo.join("config")).unwrap();
+        std::fs::write(repo.join("config/local.json"), r#"{"configVersion":1}"#).unwrap();
+        let paths = AppPaths {
+            data_directory: directory.path().join("data"),
+            logs_directory: directory.path().join("logs"),
+            config_path: directory.path().join("config.json"),
+            legacy_search_roots: vec![crate::migrate::LegacySearchRoot::Repository(repo)],
+        };
+        let state = AppState::initialize(paths, Arc::new(MemorySecretStore::default())).unwrap();
+
+        let json = serde_json::to_value(super::legacy_migration_status_cmd(&state)).unwrap();
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["data"]["applied"], true);
+        assert_eq!(json["data"]["reenterSecrets"], true);
+        assert!(json["data"]["omitted"].is_array());
+        let encoded = json.to_string().to_ascii_lowercase();
+        for needle in [
+            "password",
+            "secretvalue",
+            "sk-live",
+            "control_api_token",
+            "desktop_session",
+        ] {
+            assert!(!encoded.contains(needle), "leaked {needle}: {encoded}");
+        }
+    }
+
+    #[test]
+    fn initialize_does_not_auto_import_switched_materials() {
+        let directory = tempfile::tempdir().unwrap();
+        let repo = directory.path().join("legacy-repo");
+        std::fs::create_dir_all(repo.join("config")).unwrap();
+        std::fs::create_dir_all(repo.join("data/materials")).unwrap();
+        std::fs::write(repo.join("config/local.json"), r#"{"configVersion":1}"#).unwrap();
+        std::fs::write(repo.join("data/materials/resume.md"), "工作经历\n").unwrap();
+        let paths = AppPaths {
+            data_directory: directory.path().join("data"),
+            logs_directory: directory.path().join("logs"),
+            config_path: directory.path().join("config.json"),
+            legacy_search_roots: vec![crate::migrate::LegacySearchRoot::Repository(repo)],
+        };
+        let state =
+            AppState::initialize(paths.clone(), Arc::new(MemorySecretStore::default())).unwrap();
+        assert!(paths.data_directory.join("materials/resume.md").is_file());
+        let listed = serde_json::to_value(super::material_list_cmd(&state)).unwrap();
+        assert_eq!(listed["ok"], true);
+        assert_eq!(listed["data"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn legacy_migration_status_hides_reenter_when_a_slot_is_configured() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = AppPaths {
+            data_directory: directory.path().join("data"),
+            logs_directory: directory.path().join("logs"),
+            config_path: directory.path().join("config.json"),
+            legacy_search_roots: Vec::new(),
+        };
+        std::fs::create_dir_all(&paths.data_directory).unwrap();
+        std::fs::write(
+            paths.data_directory.join("migrated-from"),
+            r#"{"archivePath":"C:/tmp/archive","utc":"2026-09-06T00:00:00Z","omitted":[]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &paths.config_path,
+            r#"{"configVersion":1,"models":{"providers":[{"id":"p1","baseUrl":"https://one.example","credential":{"reference":"providers/p1/api-key","configured":true}}]}}"#,
+        )
+        .unwrap();
+        let state = AppState::initialize(paths, Arc::new(MemorySecretStore::default())).unwrap();
+        let json = serde_json::to_value(super::legacy_migration_status_cmd(&state)).unwrap();
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["data"]["applied"], true);
+        assert_eq!(json["data"]["reenterSecrets"], false);
+    }
+
+    #[test]
     fn config_get_public_returns_redacted_config_without_secret_material() {
         let directory = tempfile::tempdir().unwrap();
         let paths = AppPaths {
             data_directory: directory.path().join("data"),
             logs_directory: directory.path().join("logs"),
             config_path: directory.path().join("config.json"),
+            legacy_search_roots: Vec::new(),
         };
         std::fs::write(
             &paths.config_path,
@@ -1793,6 +1889,7 @@ mod tests {
             data_directory: directory.path().join("data"),
             logs_directory: directory.path().join("logs"),
             config_path: directory.path().join("config.json"),
+            legacy_search_roots: Vec::new(),
         };
         std::fs::write(&paths.config_path, "not-json").unwrap();
         let state = AppState::initialize(paths, Arc::new(MemorySecretStore::default())).unwrap();
@@ -1911,6 +2008,7 @@ mod tests {
             data_directory: directory.path().join("data"),
             logs_directory: directory.path().join("logs"),
             config_path: directory.path().join("config.json"),
+            legacy_search_roots: Vec::new(),
         };
         std::fs::write(
             &paths.config_path,
@@ -1958,6 +2056,7 @@ mod tests {
             data_directory: directory.path().join("data"),
             logs_directory: directory.path().join("logs"),
             config_path: directory.path().join("config.json"),
+            legacy_search_roots: Vec::new(),
         }
     }
 
@@ -2185,6 +2284,7 @@ mod tests {
             data_directory: directory.path().join("data"),
             logs_directory: directory.path().join("logs"),
             config_path: directory.path().join("config.json"),
+            legacy_search_roots: Vec::new(),
         };
         std::fs::write(&paths.config_path, config).unwrap();
         AppState::initialize(paths, Arc::new(MemorySecretStore::default())).unwrap()

@@ -92,6 +92,23 @@
   opacity: 0.8;
 }
 
+.reenter-secrets-banner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: baseline;
+  margin: 0 0 1rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--shell-border);
+  border-radius: 0.6rem;
+  background: var(--shell-sidebar-bg);
+  color: var(--shell-text);
+}
+
+.reenter-secrets-banner a {
+  color: var(--shell-accent);
+}
+
 
 .services-page {
   display: grid;

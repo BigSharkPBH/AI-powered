@@ -9,9 +9,10 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OpenFlags, backup::Backup};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use ts_rs::TS;
 
 use crate::{
-    config::ConfigStore,
+    config::{AppConfigV1, ConfigDirs, ConfigStore},
     database::Database,
     materials::backup::{
         BackupError, file_sha256, reject_secret_bytes, require_integrity, verify_file_hashes,
@@ -103,6 +104,86 @@ pub struct SwitchReport {
     pub files: Vec<String>,
     pub omitted: Vec<String>,
     pub marker_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct LegacyMigrationStatus {
+    pub applied: bool,
+    pub reenter_secrets: bool,
+    pub omitted: Vec<String>,
+}
+
+pub fn legacy_search_roots(dirs: &ConfigDirs, development: bool) -> Vec<LegacySearchRoot> {
+    if development {
+        vec![LegacySearchRoot::Repository(dirs.repository.clone())]
+    } else {
+        vec![LegacySearchRoot::AppData(dirs.roaming_app_data.clone())]
+    }
+}
+
+pub fn try_first_run_legacy_migration(
+    dest_data_dir: &Path,
+    search_roots: &[LegacySearchRoot],
+    app_data: &Path,
+    now: DateTime<Utc>,
+) -> Result<Option<SwitchReport>, MigrateError> {
+    if dest_already_applied(dest_data_dir) {
+        return Ok(None);
+    }
+    let found = detect_legacy_roots(search_roots);
+    let Some(root) = found.into_iter().next() else {
+        return Ok(None);
+    };
+    let backup = backup_legacy_into_app_data(&root, app_data, now)?;
+    let _verified = verify_legacy_archive(&backup.archive_path)?;
+    switch_legacy_archive(&backup.archive_path, dest_data_dir).map(Some)
+}
+
+pub fn secret_slots_configured(config: &AppConfigV1) -> bool {
+    let provider = config.models.providers.iter().any(|provider| {
+        provider
+            .credential
+            .as_ref()
+            .is_some_and(|slot| slot.configured)
+    });
+    let livekit = config
+        .transport
+        .livekit
+        .api_key
+        .as_ref()
+        .is_some_and(|slot| slot.configured)
+        || config
+            .transport
+            .livekit
+            .api_secret
+            .as_ref()
+            .is_some_and(|slot| slot.configured);
+    provider || livekit
+}
+
+pub fn legacy_migration_status(
+    dest_data_dir: &Path,
+    secrets_configured: bool,
+) -> LegacyMigrationStatus {
+    match read_migrated_from(dest_data_dir) {
+        Some(marker) => LegacyMigrationStatus {
+            applied: true,
+            reenter_secrets: !secrets_configured,
+            omitted: marker.omitted,
+        },
+        None => LegacyMigrationStatus {
+            applied: false,
+            reenter_secrets: false,
+            omitted: Vec::new(),
+        },
+    }
+}
+
+fn read_migrated_from(dest_data_dir: &Path) -> Option<MigratedFromMarker> {
+    let bytes = fs::read(dest_data_dir.join(MIGRATED_FROM)).ok()?;
+    serde_json::from_slice(&bytes).ok()
 }
 
 pub fn verify_legacy_archive(archive: &Path) -> Result<VerifiedLegacy, MigrateError> {
@@ -567,7 +648,7 @@ impl Drop for StagingDir {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MigratedFromMarker {
     archive_path: String,
@@ -866,6 +947,7 @@ fn make_tree_writable(root: &Path) -> Result<(), MigrateError> {
     make_writable(root)
 }
 
+#[allow(clippy::permissions_set_readonly_false)]
 fn make_writable(path: &Path) -> Result<(), MigrateError> {
     let mut permissions = fs::metadata(path)
         .map_err(|_| MigrateError::Operation)?

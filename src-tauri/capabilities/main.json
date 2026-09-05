@@ -8,6 +8,7 @@
     "allow-foundation-get-status",
     "allow-diagnostics-export",
     "allow-config-get-startup-state",
+    "allow-legacy-migration-status",
     "allow-config-get-public",
     "allow-config-restore-last-good",
     "allow-config-restore-defaults",

@@ -5,8 +5,10 @@ use rusqlite::{Connection, OpenFlags};
 
 use super::{
     LegacyKind, LegacySearchRoot, backup_legacy, backup_legacy_into_app_data, detect_legacy_roots,
-    switch_legacy_archive, verify_legacy_archive,
+    legacy_migration_status, legacy_search_roots, secret_slots_configured, switch_legacy_archive,
+    try_first_run_legacy_migration, verify_legacy_archive,
 };
+use crate::config::{AppConfigV1, ConfigDirs};
 
 const SECRET_DECOY: &str = "sk-live-migrate-forbidden-key";
 const SAFE_CONFIG: &str = r#"{"configVersion":1}"#;
@@ -48,12 +50,13 @@ fn write_account_sqlite(path: &Path) {
         .unwrap();
 }
 
+#[allow(clippy::permissions_set_readonly_false)]
 fn allow_cleanup(path: &Path) {
-    if path.is_dir() {
-        if let Ok(entries) = fs::read_dir(path) {
-            for entry in entries.flatten() {
-                allow_cleanup(&entry.path());
-            }
+    if path.is_dir()
+        && let Ok(entries) = fs::read_dir(path)
+    {
+        for entry in entries.flatten() {
+            allow_cleanup(&entry.path());
         }
     }
     if let Ok(metadata) = fs::metadata(path) {
@@ -696,4 +699,176 @@ fn switch_leaves_dest_unchanged_when_verify_or_copy_fails() {
     assert!(blocked_path.is_file());
     assert_eq!(fs::read(&blocked_path).unwrap(), b"not-a-directory");
     allow_cleanup(archive.path());
+}
+
+#[test]
+fn first_run_is_noop_without_legacy_roots() {
+    let dest = tempfile::tempdir().unwrap();
+    let empty = tempfile::tempdir().unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 9, 6, 2, 0, 0).unwrap();
+
+    let report = try_first_run_legacy_migration(
+        dest.path(),
+        &[
+            LegacySearchRoot::Repository(empty.path().to_path_buf()),
+            LegacySearchRoot::AppData(empty.path().to_path_buf()),
+        ],
+        dest.path(),
+        now,
+    )
+    .unwrap();
+
+    assert!(report.is_none());
+    assert!(!dest.path().join("migrated-from").exists());
+    assert!(!dest.path().join("app.sqlite3").exists());
+    assert!(!dest.path().join("backups").exists());
+}
+
+#[test]
+fn first_run_switches_before_live_sqlite_exists() {
+    let repo = tempfile::tempdir().unwrap();
+    write(&repo.path().join("config/local.json"), SAFE_CONFIG);
+    write(
+        &repo.path().join("data/materials/resume.md"),
+        "工作经历\n2019.03-2021.06 负责订单服务。",
+    );
+    let dest = tempfile::tempdir().unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 9, 6, 2, 1, 0).unwrap();
+    assert!(!dest.path().join("app.sqlite3").exists());
+
+    let report = try_first_run_legacy_migration(
+        dest.path(),
+        &[LegacySearchRoot::Repository(repo.path().to_path_buf())],
+        dest.path(),
+        now,
+    )
+    .unwrap()
+    .expect("legacy switch should apply");
+
+    assert!(dest.path().join("migrated-from").is_file());
+    assert_eq!(report.marker_path, dest.path().join("migrated-from"));
+    assert!(!dest.path().join("app.sqlite3").exists());
+    assert!(
+        dest.path()
+            .join("backups/legacy-20260906T020100Z/manifest.json")
+            .is_file()
+    );
+    assert!(!contains_secret_material(
+        &fs::read_to_string(dest.path().join("migrated-from")).unwrap()
+    ));
+}
+
+#[test]
+fn first_run_skips_dest_that_already_has_schema() {
+    let repo = tempfile::tempdir().unwrap();
+    write(&repo.path().join("config/local.json"), SAFE_CONFIG);
+    let dest = tempfile::tempdir().unwrap();
+    write_ok_sqlite(&dest.path().join("app.sqlite3"));
+    let now = Utc.with_ymd_and_hms(2026, 9, 6, 2, 2, 0).unwrap();
+
+    let report = try_first_run_legacy_migration(
+        dest.path(),
+        &[LegacySearchRoot::Repository(repo.path().to_path_buf())],
+        dest.path(),
+        now,
+    )
+    .unwrap();
+
+    assert!(report.is_none());
+    assert!(!dest.path().join("migrated-from").exists());
+    assert!(!dest.path().join("backups").exists());
+}
+
+#[test]
+fn first_run_failure_leaves_dest_without_marker() {
+    let dest = tempfile::NamedTempFile::new().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    write(&repo.path().join("config/local.json"), SAFE_CONFIG);
+    let now = Utc.with_ymd_and_hms(2026, 9, 6, 2, 3, 0).unwrap();
+
+    assert!(
+        try_first_run_legacy_migration(
+            dest.path(),
+            &[LegacySearchRoot::Repository(repo.path().to_path_buf())],
+            dest.path(),
+            now,
+        )
+        .is_err()
+    );
+    assert!(dest.path().is_file());
+    assert!(!dest.path().join("migrated-from").exists());
+}
+
+#[test]
+fn status_flags_reenter_when_applied_and_slots_empty() {
+    let dest = tempfile::tempdir().unwrap();
+    write(
+        &dest.path().join("migrated-from"),
+        r#"{"archivePath":"C:/tmp/archive","utc":"2026-09-06T00:00:00Z","omitted":[".env"]}"#,
+    );
+
+    let empty = legacy_migration_status(dest.path(), false);
+    assert!(empty.applied);
+    assert!(empty.reenter_secrets);
+    assert_eq!(empty.omitted, vec![".env".to_owned()]);
+
+    let filled = legacy_migration_status(dest.path(), true);
+    assert!(filled.applied);
+    assert!(!filled.reenter_secrets);
+    assert_eq!(filled.omitted, vec![".env".to_owned()]);
+
+    let fresh = tempfile::tempdir().unwrap();
+    let unused = legacy_migration_status(fresh.path(), false);
+    assert!(!unused.applied);
+    assert!(!unused.reenter_secrets);
+    assert!(unused.omitted.is_empty());
+}
+
+#[test]
+fn status_and_marker_never_include_secret_material() {
+    let dest = tempfile::tempdir().unwrap();
+    write(
+        &dest.path().join("migrated-from"),
+        r#"{"archivePath":"C:/tmp/archive","utc":"2026-09-06T00:00:00Z","omitted":["cookies"]}"#,
+    );
+    let status = serde_json::to_value(legacy_migration_status(dest.path(), false)).unwrap();
+    let encoded = status.to_string();
+    assert!(!contains_secret_material(&encoded), "{encoded}");
+    assert!(status.get("apiKey").is_none());
+    assert!(status.get("apiSecret").is_none());
+    assert_eq!(status["omitted"], serde_json::json!(["cookies"]));
+}
+
+#[test]
+fn secret_slots_configured_reads_provider_and_livekit_flags() {
+    let empty = AppConfigV1::from_json(SAFE_CONFIG).unwrap();
+    assert!(!secret_slots_configured(&empty));
+
+    let provider = AppConfigV1::from_json(
+        r#"{"configVersion":1,"models":{"providers":[{"id":"p1","baseUrl":"https://one.example","credential":{"reference":"providers/p1/api-key","configured":true}}]}}"#,
+    )
+    .unwrap();
+    assert!(secret_slots_configured(&provider));
+
+    let livekit = AppConfigV1::from_json(
+        r#"{"configVersion":1,"transport":{"livekit":{"enabled":false,"url":null,"apiKey":{"reference":"transport/livekit/api-key","configured":true},"apiSecret":{"reference":"transport/livekit/api-secret","configured":false},"ready":false,"status":null,"configVersion":0}}}"#,
+    )
+    .unwrap();
+    assert!(secret_slots_configured(&livekit));
+}
+
+#[test]
+fn locator_roots_are_repo_in_dev_and_roaming_parent_in_release() {
+    let dirs = ConfigDirs {
+        repository: std::path::PathBuf::from(r"E:\source\assistant"),
+        roaming_app_data: std::path::PathBuf::from(r"C:\Users\tester\AppData\Roaming"),
+    };
+    assert_eq!(
+        legacy_search_roots(&dirs, true),
+        vec![LegacySearchRoot::Repository(dirs.repository.clone())]
+    );
+    assert_eq!(
+        legacy_search_roots(&dirs, false),
+        vec![LegacySearchRoot::AppData(dirs.roaming_app_data.clone())]
+    );
 }
