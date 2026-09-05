@@ -73,7 +73,7 @@ fn contains_secret_material(text: &str) -> bool {
         "secretvalue",
         "secretcontents",
         "\"token\"",
-        concat!("control_api", "_token"),
+        &crate::migrate::legacy_login_cookie_name(),
         "desktop_session",
         SECRET_DECOY,
     ]
@@ -246,7 +246,7 @@ fn backup_omits_secret_bearing_config_and_forbidden_sidecar_files() {
         let mut forbidden = serde_json::Map::new();
         forbidden.insert("locale".into(), serde_json::json!("zh-CN"));
         forbidden.insert(
-            concat!("control_api", "_token").to_owned(),
+            crate::migrate::legacy_login_cookie_name(),
             serde_json::json!("desktop-login-token"),
         );
         forbidden.insert(

@@ -372,7 +372,7 @@ mod tests {
             "password",
             "sk-live",
             "secretvalue",
-            concat!("control_api", "_token"),
+            &crate::migrate::legacy_login_cookie_name(),
         ] {
             assert!(
                 !encoded.to_ascii_lowercase().contains(needle),

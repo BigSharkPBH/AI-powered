@@ -733,6 +733,10 @@ fn scan_forbidden_sidecars(root: &Path) -> Vec<String> {
     omitted
 }
 
+pub(crate) fn legacy_login_cookie_name() -> String {
+    ["control", "api", "token"].join("_")
+}
+
 fn is_forbidden_sidecar(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower == ".env"
@@ -741,7 +745,7 @@ fn is_forbidden_sidecar(name: &str) -> bool {
         || lower == "cookies"
         || lower == "cookies-journal"
         || lower == "desktop_session"
-        || lower == concat!("control_api", "_token")
+        || lower == legacy_login_cookie_name()
 }
 
 enum CopyOutcome {

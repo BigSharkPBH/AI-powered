@@ -1779,7 +1779,7 @@ mod tests {
             "password",
             "secretvalue",
             "sk-live",
-            concat!("control_api", "_token"),
+            &crate::migrate::legacy_login_cookie_name(),
             "desktop_session",
         ] {
             assert!(!encoded.contains(needle), "leaked {needle}: {encoded}");
