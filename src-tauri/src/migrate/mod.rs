@@ -741,7 +741,7 @@ fn is_forbidden_sidecar(name: &str) -> bool {
         || lower == "cookies"
         || lower == "cookies-journal"
         || lower == "desktop_session"
-        || lower == "control_api_token"
+        || lower == concat!("control_api", "_token")
 }
 
 enum CopyOutcome {

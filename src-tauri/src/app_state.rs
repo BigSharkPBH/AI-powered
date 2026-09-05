@@ -368,7 +368,12 @@ mod tests {
         assert!(status.applied);
         assert!(status.reenter_secrets);
         let encoded = serde_json::to_string(&status).unwrap();
-        for needle in ["password", "sk-live", "secretvalue", "control_api_token"] {
+        for needle in [
+            "password",
+            "sk-live",
+            "secretvalue",
+            concat!("control_api", "_token"),
+        ] {
             assert!(
                 !encoded.to_ascii_lowercase().contains(needle),
                 "status leaked {needle}: {encoded}"

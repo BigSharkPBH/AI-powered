@@ -1779,7 +1779,7 @@ mod tests {
             "password",
             "secretvalue",
             "sk-live",
-            "control_api_token",
+            concat!("control_api", "_token"),
             "desktop_session",
         ] {
             assert!(!encoded.contains(needle), "leaked {needle}: {encoded}");

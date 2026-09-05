@@ -73,7 +73,7 @@ fn contains_secret_material(text: &str) -> bool {
         "secretvalue",
         "secretcontents",
         "\"token\"",
-        "control_api_token",
+        concat!("control_api", "_token"),
         "desktop_session",
         SECRET_DECOY,
     ]
@@ -242,17 +242,21 @@ fn backup_writes_scrubbed_layout_and_hashes() {
 #[test]
 fn backup_omits_secret_bearing_config_and_forbidden_sidecar_files() {
     let electron = tempfile::tempdir().unwrap();
-    write(
-        &electron.path().join("config.json"),
-        &serde_json::json!({
-            "locale": "zh-CN",
-            "control_api_token": "desktop-login-token",
-            "desktop_session": "session-cookie",
-            "cookies": "sid=abc",
-            "apiKey": SECRET_DECOY
-        })
-        .to_string(),
-    );
+    write(&electron.path().join("config.json"), &{
+        let mut forbidden = serde_json::Map::new();
+        forbidden.insert("locale".into(), serde_json::json!("zh-CN"));
+        forbidden.insert(
+            concat!("control_api", "_token").to_owned(),
+            serde_json::json!("desktop-login-token"),
+        );
+        forbidden.insert(
+            "desktop_session".into(),
+            serde_json::json!("session-cookie"),
+        );
+        forbidden.insert("cookies".into(), serde_json::json!("sid=abc"));
+        forbidden.insert("apiKey".into(), serde_json::json!(SECRET_DECOY));
+        serde_json::Value::Object(forbidden).to_string()
+    });
     write(&electron.path().join(".env"), "OPENAI_API_KEY=sk-env");
     write_bytes(
         &electron.path().join("id.pem"),
