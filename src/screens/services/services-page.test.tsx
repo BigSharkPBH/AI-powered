@@ -1,7 +1,8 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as commands from "../../api/commands";
+import type { VoiceRouteConfig } from "../../generated/bindings";
 import { ServicesPage } from "./services-page";
 
 vi.mock("../../api/commands", () => ({
@@ -56,13 +57,44 @@ describe("ServicesPage", () => {
     vi.clearAllMocks();
   });
 
-  it("renders provider and voice route management", async () => {
+  it("opens providers by default and exposes one category at a time", async () => {
     render(<ServicesPage />);
     expect(screen.getByRole("heading", { level: 1 }).textContent).toContain("服务");
     expect(await screen.findByRole("heading", { name: "模型供应商" })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "语音线路" })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "Embedding" })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "LiveKit" })).toBeTruthy();
+    const navigation = within(screen.getByRole("navigation", { name: "服务分类" }));
+    expect(navigation.getByRole("button", { name: "模型供应商" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.queryByRole("heading", { name: "语音线路" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Embedding" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "LiveKit" })).toBeNull();
+    for (const name of ["语音线路", "Embedding", "LiveKit"]) {
+      fireEvent.click(navigation.getByRole("button", { name }));
+      expect(screen.getByRole("heading", { name })).toBeTruthy();
+      expect(screen.queryByRole("heading", { name: "模型供应商" })).toBeNull();
+    }
+  });
+
+  it("preserves provider, route, embedding and LiveKit drafts across category switches", async () => {
+    render(<ServicesPage />);
+    await screen.findByText("还没有供应商。");
+    const providerPanel = within(screen.getByRole("region", { name: "模型供应商" }));
+    fireEvent.change(providerPanel.getByLabelText("显示名称"), { target: { value: "草稿供应商" } });
+    fireEvent.click(screen.getByRole("button", { name: "语音线路" }));
+    fireEvent.change(screen.getByLabelText("线路名称"), { target: { value: "草稿线路" } });
+    expect(screen.queryByRole("textbox", { name: "显示名称" })).toBeNull();
+    expect(document.getElementById("services-panel-providers")?.hidden).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Embedding" }));
+    fireEvent.change(screen.getByLabelText("配置 ID"), { target: { value: "embedding-draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "LiveKit" }));
+    fireEvent.change(screen.getByLabelText("服务 URL"), { target: { value: "wss://draft.test" } });
+    fireEvent.click(screen.getByRole("button", { name: "模型供应商" }));
+    expect((providerPanel.getByLabelText("显示名称") as HTMLInputElement).value).toBe("草稿供应商");
+    fireEvent.click(screen.getByRole("button", { name: "语音线路" }));
+    expect((screen.getByLabelText("线路名称") as HTMLInputElement).value).toBe("草稿线路");
+    fireEvent.click(screen.getByRole("button", { name: "Embedding" }));
+    expect((screen.getByLabelText("配置 ID") as HTMLInputElement).value).toBe("embedding-draft");
+    fireEvent.click(screen.getByRole("button", { name: "LiveKit" }));
+    expect((screen.getByLabelText("服务 URL") as HTMLInputElement).value).toBe("wss://draft.test");
   });
 
   it("submits a provider key and clears the password field", async () => {
@@ -74,7 +106,7 @@ describe("ServicesPage", () => {
     await screen.findByRole("heading", { name: "模型供应商" });
     fireEvent.change(screen.getByLabelText("供应商 ID"), { target: { value: "openai" } });
     fireEvent.change(screen.getByLabelText("显示名称"), { target: { value: "OpenAI" } });
-    fireEvent.change(screen.getByLabelText("接口基址"), { target: { value: "https://example.test/v1" } });
+    fireEvent.change(within(screen.getByRole("region", { name: "模型供应商" })).getByLabelText("接口基址"), { target: { value: "https://example.test/v1" } });
     const key = screen.getAllByLabelText(/API Key/)[0] as HTMLInputElement;
     fireEvent.change(key, { target: { value: "secret-marker" } });
     fireEvent.click(screen.getByRole("button", { name: "保存供应商" }));
@@ -155,8 +187,60 @@ describe("ServicesPage", () => {
     });
     const { container } = render(<ServicesPage />);
     fireEvent.click(await screen.findByRole("button", { name: "发现模型" }));
+    fireEvent.click(screen.getByRole("button", { name: "语音线路" }));
     fireEvent.change(screen.getByLabelText("ASR 供应商"), { target: { value: "openai" } });
     await waitFor(() => expect(container.querySelector('#models-asr option[value="model-a"]')).not.toBeNull());
     expect((screen.getByLabelText("ASR 模型") as HTMLInputElement).getAttribute("list")).toBe("models-asr");
+  });
+
+  it("saves an end-to-end route with only realtime fields and requires a successful test before activation", async () => {
+    const saved: VoiceRouteConfig = {
+      id: "realtime", name: "实时线路", mode: "e2e",
+      asrProviderId: null, asrModelId: null, llmProviderId: null, llmModelId: null,
+      ttsProviderId: null, ttsModelId: null, voiceId: "alloy",
+      e2eProviderId: "openai", e2eModelId: "realtime-model",
+      active: false, ready: false, status: "not_tested", configVersion: 1,
+    };
+    const config = {
+      ...emptyConfig,
+      models: { providers: [{ id: "openai", name: "OpenAI", baseUrl: "https://example.test/v1", credential: null }], activeProviderId: null },
+    };
+    let ready = false;
+    let hasRoute = false;
+    vi.mocked(commands.getConfigPublic).mockImplementation(async () => ({
+      ok: true,
+      data: { ...config, speech: { voiceRoutes: hasRoute ? [{ ...saved, ready }] : [], activeVoiceRouteId: null } },
+    }));
+    vi.mocked(commands.saveSpeechRoute).mockImplementation(async () => {
+      hasRoute = true;
+      return { ok: true, data: saved };
+    });
+    vi.mocked(commands.testSpeechRoute).mockImplementation(async () => {
+      ready = true;
+      return { ok: true, data: { routeId: "realtime", ready: true, checkedProviderIds: ["openai"] } };
+    });
+    vi.mocked(commands.activateSpeechRoute).mockResolvedValue({ ok: true, data: { ...saved, ready: true, active: true } });
+    render(<ServicesPage />);
+    await screen.findByRole("button", { name: "编辑 OpenAI" });
+    fireEvent.click(screen.getByRole("button", { name: "语音线路" }));
+    fireEvent.change(screen.getByLabelText("线路 ID"), { target: { value: "realtime" } });
+    fireEvent.change(screen.getByLabelText("线路名称"), { target: { value: "实时线路" } });
+    fireEvent.change(screen.getByLabelText("ASR 模型"), { target: { value: "discarded-asr" } });
+    fireEvent.change(screen.getByLabelText("模式"), { target: { value: "e2e" } });
+    fireEvent.change(screen.getByLabelText("Realtime 供应商"), { target: { value: "openai" } });
+    fireEvent.change(screen.getByLabelText("Realtime 模型"), { target: { value: "realtime-model" } });
+    fireEvent.change(screen.getByLabelText("音色 ID（可选）"), { target: { value: "alloy" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存语音线路" }));
+    await waitFor(() => expect(commands.saveSpeechRoute).toHaveBeenCalledWith({
+      id: "realtime", name: "实时线路", mode: "e2e",
+      asrProviderId: null, asrModelId: null, llmProviderId: null, llmModelId: null,
+      ttsProviderId: null, ttsModelId: null, voiceId: "alloy",
+      e2eProviderId: "openai", e2eModelId: "realtime-model",
+    }));
+    expect((screen.getByRole("button", { name: "启用" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "测试" }));
+    await waitFor(() => expect((screen.getByRole("button", { name: "启用" }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "启用" }));
+    await waitFor(() => expect(commands.activateSpeechRoute).toHaveBeenCalledWith("realtime"));
   });
 });

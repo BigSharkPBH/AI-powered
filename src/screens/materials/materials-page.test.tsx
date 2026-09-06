@@ -25,10 +25,11 @@ describe("MaterialsPage", () => {
     expect(screen.getByRole("heading", { level: 1 }).textContent).toContain("资料");
   });
 
-  it("renders non-empty capabilities", () => {
+  it("renders actual search and index actions", () => {
     render(<MaterialsPage />);
-    const items = screen.getAllByRole("listitem");
-    expect(items.length).toBeGreaterThan(0);
+    expect(screen.getByRole("search", { name: "搜索资料" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "重建索引" })).toBeTruthy();
+    expect(screen.queryByText(/Design §/)).toBeNull();
   });
 
   it("does not call fetch", () => {

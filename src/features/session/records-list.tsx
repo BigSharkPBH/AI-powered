@@ -1,10 +1,36 @@
 import { useCallback, useEffect, useState } from "react";
+import { ArrowLeft, ArrowUpRight, Download, MessageSquare, Quote, Trash2 } from "lucide-react";
 
 import * as api from "../../api/commands";
 import type { CommandResult, SessionDetail, SessionSummary } from "../../generated/bindings";
+import "../../styles/library.css";
 
 const errorText = (error: { code: string; message: string; field?: string | null }) =>
   `${error.field ? error.field + "：" : ""}${error.code}：${error.message}`;
+
+const sessionStatus: Record<string, string> = {
+  idle: "未开始",
+  preparing: "准备中",
+  listening: "聆听中",
+  thinking: "思考中",
+  speaking: "朗读中",
+  paused: "已暂停",
+  stopping: "结束中",
+  completed: "已完成",
+  recovering: "恢复中",
+  blocked: "需处理",
+  failed: "失败",
+  interrupted: "已中断",
+};
+
+function sessionDate(session: SessionSummary) {
+  const value = session.startedAt ?? session.updatedAt;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value || "时间未知";
+  return date.toLocaleString("zh-CN", {
+    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  });
+}
 
 export function RecordsList() {
   const [items, setItems] = useState<SessionSummary[]>([]);
@@ -12,12 +38,14 @@ export function RecordsList() {
   const [message, setMessage] = useState("正在读取会话记录…");
   const [busy, setBusy] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
 
   const reload = useCallback(async () => {
     try {
       const result = await api.listSessions();
       if (result.ok) {
         setItems(result.data);
+        setLoaded(true);
         setMessage("");
       } else {
         setMessage(errorText(result.error));
@@ -87,56 +115,99 @@ export function RecordsList() {
 
   return (
     <section className="service-panel records-list" aria-labelledby="records-list-heading">
-      <h2 id="records-list-heading">会话记录</h2>
+      <div className="library-heading">
+        <h2 id="records-list-heading">会话记录</h2>
+        {loaded && !detail && <span className="muted">{items.length} 次会话</span>}
+      </div>
       {message && (
         <p className="services-message" role="status">
           {message}
         </p>
       )}
       {detail ? (
-        <div className="service-list" aria-label="会话详情">
-          <article className="service-card">
-            <h3>{detail.session.id}</h3>
-            <p>{detail.session.status}</p>
-            <div className="service-actions">
-              <button disabled={busy} type="button" onClick={() => setDetail(null)}>
-                返回列表
-              </button>
-              <button disabled={busy} type="button" onClick={() => void exportRecord("markdown")}>
+        <section className="record-detail" aria-label="会话详情" aria-busy={busy}>
+          <div className="record-detail-toolbar">
+            <button className="button-ghost" disabled={busy} type="button" onClick={() => setDetail(null)}>
+              <ArrowLeft size={16} aria-hidden="true" />
+              返回列表
+            </button>
+            <div className="service-actions" aria-label="导出会话">
+              <button className="button-ghost" disabled={busy} type="button" onClick={() => void exportRecord("markdown")}>
+                <Download size={15} aria-hidden="true" />
                 导出 Markdown
               </button>
-              <button disabled={busy} type="button" onClick={() => void exportRecord("json")}>
+              <button className="button-ghost" disabled={busy} type="button" onClick={() => void exportRecord("json")}>
                 导出 JSON
               </button>
-              <button disabled={busy} type="button" onClick={() => void exportRecord("text")}>
+              <button className="button-ghost" disabled={busy} type="button" onClick={() => void exportRecord("text")}>
                 导出文本
               </button>
             </div>
-          </article>
+          </div>
+          <header className="record-detail-heading">
+            <div className="library-heading">
+              <h3><time dateTime={detail.session.startedAt ?? detail.session.updatedAt}>{sessionDate(detail.session)}</time></h3>
+              <span className="status-badge" data-tone={detail.session.status === "failed" ? "danger" : "neutral"}>
+                {sessionStatus[detail.session.status] ?? detail.session.status}
+              </span>
+            </div>
+            <p className="library-meta">角色 {detail.session.roleProfileId || "未指定"}</p>
+            <p className="record-id">会话 ID <code>{detail.session.id}</code></p>
+          </header>
+          {detail.turns.length === 0 && <p className="empty-state">本次会话还没有对话内容。</p>}
           {detail.turns.map((item) => (
-            <article className="service-card" key={item.id}>
-              <h3>回合 {item.turnIndex}</h3>
-              <p>{item.userText}</p>
-              <p>{item.assistantText}</p>
-              {!item.materialsUsed && <p>本轮未使用资料</p>}
-              {item.citations.map((citation) => (
-                <p key={`${citation.materialId}-${citation.chunkId}`}>{citation.snippet}</p>
-              ))}
+            <article className="record-turn" key={item.id} aria-label={`回合 ${item.turnIndex + 1}`}>
+              <h3>回合 {item.turnIndex + 1}</h3>
+              <section className="record-message record-user" aria-label="用户内容">
+                <h4>你</h4>
+                <p>{item.userText || "本轮没有用户内容。"}</p>
+              </section>
+              <section className="record-message record-assistant" aria-label="AI 回复">
+                <h4>AI 助手</h4>
+                <p>{item.assistantText || "本轮没有 AI 回复。"}</p>
+              </section>
+              <section className="record-citations" aria-label="资料引用">
+                {!item.materialsUsed && <p className="muted">本轮未使用资料</p>}
+                {item.citations.length > 0 && <h4><Quote size={14} aria-hidden="true" />引用片段</h4>}
+                {item.citations.map((citation) => (
+                  <blockquote key={`${citation.materialId}-${citation.chunkId}`}>
+                    <p>{citation.snippet}</p>
+                    <footer>资料 ID <code>{citation.materialId}</code></footer>
+                  </blockquote>
+                ))}
+              </section>
             </article>
           ))}
-        </div>
+        </section>
       ) : (
-        <div className="service-list">
-          {items.length === 0 && <p>还没有记录。</p>}
+        <div className="library-rows" aria-label="会话列表" aria-busy={busy}>
+          {loaded && items.length === 0 && (
+            <div className="empty-state library-empty">
+              <MessageSquare size={28} aria-hidden="true" />
+              <p>还没有记录。</p>
+              <span className="muted">在工作台开始会话后，可在这里回看对话。</span>
+            </div>
+          )}
           {items.map((item) => (
-            <article className="service-card" key={item.id}>
-              <h3>{item.id}</h3>
-              <p>{item.status}</p>
-              <div className="service-actions">
-                <button disabled={busy} type="button" onClick={() => void openDetail(item.id)}>
+            <article className="library-row" key={item.id}>
+              <div className="library-file-icon"><MessageSquare size={20} aria-hidden="true" /></div>
+              <div className="library-row-content">
+                <h3><time dateTime={item.startedAt ?? item.updatedAt}>{sessionDate(item)}</time></h3>
+                <div className="library-meta">
+                  <span className="status-badge" data-tone={item.status === "failed" ? "danger" : "neutral"}>
+                    {sessionStatus[item.status] ?? item.status}
+                  </span>
+                  <span>角色 {item.roleProfileId || "未指定"}</span>
+                </div>
+                <p className="record-id">会话 ID <code>{item.id}</code></p>
+              </div>
+              <div className="service-actions library-row-actions">
+                <button className="button-ghost" disabled={busy} type="button" onClick={() => void openDetail(item.id)}>
                   查看
+                  <ArrowUpRight size={15} aria-hidden="true" />
                 </button>
                 <button
+                  className={pendingDelete === item.id ? "button-danger" : "button-ghost"}
                   disabled={busy}
                   type="button"
                   onClick={() => {
@@ -149,10 +220,11 @@ export function RecordsList() {
                     });
                   }}
                 >
+                  <Trash2 size={15} aria-hidden="true" />
                   {pendingDelete === item.id ? "确认删除" : "删除"}
                 </button>
                 {pendingDelete === item.id && (
-                  <button disabled={busy} type="button" onClick={() => setPendingDelete(null)}>
+                  <button className="button-ghost" disabled={busy} type="button" onClick={() => setPendingDelete(null)}>
                     取消
                   </button>
                 )}

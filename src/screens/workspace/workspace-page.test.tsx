@@ -38,10 +38,11 @@ describe("WorkspacePage", () => {
     expect(screen.getByRole("heading", { level: 1 }).textContent).toContain("工作台");
   });
 
-  it("renders non-empty capabilities", () => {
+  it("renders the conversation and a labeled composer", () => {
     render(<WorkspacePage />);
-    const items = screen.getAllByRole("listitem");
-    expect(items.length).toBeGreaterThan(0);
+    expect(screen.getByRole("region", { name: "当前轮对话" })).toBeTruthy();
+    expect(screen.getByRole("textbox", { name: "语句输入" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "发送" })).toBeTruthy();
   });
 
   it("does not call fetch", () => {

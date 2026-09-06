@@ -25,9 +25,10 @@ export function LegacyImportPanel() {
   }
 
   return (
-    <section aria-labelledby="legacy-import-heading">
-      <h2 id="legacy-import-heading">导入旧会话</h2>
-      <form onSubmit={(event) => void submit(event)}>
+    <section className="service-panel settings-section" aria-labelledby="legacy-import-heading">
+      <h2 className="section-heading" id="legacy-import-heading">导入旧会话</h2>
+      <p className="configuration-description">从旧版本的数据目录导入会话记录。</p>
+      <form className="service-form configuration-migration-form" onSubmit={(event) => void submit(event)}>
         <label htmlFor="legacy-source-path">旧数据目录</label>
         <input
           id="legacy-source-path"
@@ -36,11 +37,11 @@ export function LegacyImportPanel() {
           onChange={(event) => setPath(event.target.value)}
           placeholder="例如 E:\\old-install 或 .desktop-runtime"
         />
-        <button type="submit" disabled={busy || path.trim().length === 0}>
+        <button className="button-primary" type="submit" disabled={busy || path.trim().length === 0}>
           导入旧会话
         </button>
       </form>
-      {message ? <p role="status">{message}</p> : null}
+      {message ? <p className="services-message" role="status">{message}</p> : null}
     </section>
   );
 }

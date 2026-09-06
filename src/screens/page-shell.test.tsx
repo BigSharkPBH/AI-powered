@@ -11,21 +11,20 @@ describe("PageShell", () => {
     expect(screen.getByRole("heading", { level: 1 }).textContent).toContain("工作台");
   });
 
-  it("renders design section reference", () => {
+  it("gives a short, task-oriented introduction", () => {
     render(<PageShell id="services" />);
-    expect(screen.getByText(/Design §6\.4/)).toBeTruthy();
+    expect(screen.getByText("连接模型与语音服务，配置你的 AI 能力。")).toBeTruthy();
   });
 
-  it("renders capabilities list", () => {
+  it("keeps design references and capability inventories out of the page", () => {
     render(<PageShell id="materials" />);
-    const list = screen.getByRole("list");
-    expect(list).toBeTruthy();
-    expect(list.querySelectorAll("li").length).toBeGreaterThan(0);
+    expect(screen.queryByRole("list")).toBeNull();
+    expect(screen.queryByText(/Design §/)).toBeNull();
   });
 
-  it("renders placeholder status text", () => {
+  it("does not describe working pages as placeholders", () => {
     render(<PageShell id="records" />);
-    expect(screen.getByText(/尚未接入业务逻辑/)).toBeTruthy();
+    expect(screen.queryByText(/尚未接入业务逻辑/)).toBeNull();
   });
 
   it("has region role with aria-labelledby", () => {
@@ -33,6 +32,7 @@ describe("PageShell", () => {
     const region = screen.getByRole("region");
     expect(region).toBeTruthy();
     expect(region.getAttribute("aria-labelledby")).toBeTruthy();
+    expect(document.getElementById(region.getAttribute("aria-labelledby")!)?.textContent).toBe("设置");
   });
 
   it("does not render interactive elements", () => {

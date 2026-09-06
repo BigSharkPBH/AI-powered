@@ -25,10 +25,11 @@ describe("RecordsPage", () => {
     expect(screen.getByRole("heading", { level: 1 }).textContent).toContain("记录");
   });
 
-  it("renders non-empty capabilities", () => {
+  it("renders the records region and its empty state", async () => {
     render(<RecordsPage />);
-    const items = screen.getAllByRole("listitem");
-    expect(items.length).toBeGreaterThan(0);
+    expect(screen.getByRole("region", { name: "会话记录" })).toBeTruthy();
+    expect(await screen.findByText("还没有记录。")).toBeTruthy();
+    expect(screen.queryByText(/Design §/)).toBeNull();
   });
 
   it("does not call fetch", () => {

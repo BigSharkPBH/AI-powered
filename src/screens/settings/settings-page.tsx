@@ -1,14 +1,24 @@
 import { useEffect, useState } from "react";
+import { ArchiveRestore, Palette, UserRound } from "lucide-react";
 
 import { getLegacyMigrationStatus } from "../../api/commands";
+import { AppearanceSettings } from "../../features/appearance/appearance-settings";
 import { LegacyImportPanel } from "../../features/migrate/legacy-import";
 import { ReenterSecretsBanner } from "../../features/migrate/reenter-secrets-banner";
 import { RoleEditor } from "../../features/roles/role-editor";
 import type { LegacyMigrationStatus } from "../../generated/bindings";
 import { PageShell } from "../page-shell";
+import "../../styles/configuration.css";
+
+const categories = [
+  { id: "appearance", label: "外观", icon: Palette },
+  { id: "roles", label: "角色", icon: UserRound },
+  { id: "migration", label: "数据迁移", icon: ArchiveRestore },
+] as const;
 
 export function SettingsPage() {
   const [migration, setMigration] = useState<LegacyMigrationStatus | null>(null);
+  const [category, setCategory] = useState<(typeof categories)[number]["id"]>("appearance");
 
   useEffect(() => {
     void getLegacyMigrationStatus()
@@ -21,11 +31,23 @@ export function SettingsPage() {
   }, []);
 
   return (
-    <>
+    <div className="settings-page">
       <PageShell id="settings" />
       <ReenterSecretsBanner status={migration} />
-      <LegacyImportPanel />
-      <RoleEditor />
-    </>
+      <div className="configuration-layout">
+        <nav className="settings-nav" aria-label="设置分类">
+          {categories.map(({ id, label, icon: Icon }) => (
+            <button key={id} id={`settings-category-${id}`} type="button" aria-current={category === id ? "page" : undefined} aria-controls={`settings-panel-${id}`} onClick={() => setCategory(id)}>
+              <Icon size={16} aria-hidden="true" />{label}
+            </button>
+          ))}
+        </nav>
+        <div className="configuration-content">
+          <section id="settings-panel-appearance" hidden={category !== "appearance"} aria-labelledby="settings-category-appearance"><AppearanceSettings /></section>
+          <section id="settings-panel-roles" hidden={category !== "roles"} aria-labelledby="settings-category-roles"><RoleEditor /></section>
+          <section id="settings-panel-migration" hidden={category !== "migration"} aria-labelledby="settings-category-migration"><LegacyImportPanel /></section>
+        </div>
+      </div>
+    </div>
   );
 }

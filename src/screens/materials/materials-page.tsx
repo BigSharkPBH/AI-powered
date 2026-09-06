@@ -4,7 +4,7 @@ import { PageShell } from "../page-shell";
 export function MaterialsPage() {
   return (
     <>
-      <PageShell id="materials" hideStatus />
+      <PageShell id="materials" />
       <MaterialsLibrary />
     </>
   );

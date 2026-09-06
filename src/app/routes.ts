@@ -33,7 +33,7 @@ export function routeLabel(id: RouteId): string {
     materials: "资料",
     records: "记录",
     services: "服务",
-    settings: "设置与诊断",
+    settings: "设置",
   };
   return labels[id];
 }

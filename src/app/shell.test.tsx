@@ -61,7 +61,7 @@ describe("Shell", () => {
   it("renders settings page when hash is #/settings", () => {
     window.location.hash = "#/settings";
     render(<Shell />);
-    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("设置与诊断");
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("设置");
   });
 
   it("clicking nav button changes the displayed page", () => {
@@ -69,5 +69,15 @@ describe("Shell", () => {
     const recordsButton = screen.getByRole("button", { name: "记录" });
     fireEvent.click(recordsButton);
     expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("记录");
+  });
+
+  it("starts the new page at the top after navigating from a long form", () => {
+    window.location.hash = "#/services";
+    render(<Shell />);
+    const main = screen.getByRole("main");
+    main.scrollTop = 400;
+    fireEvent.click(screen.getByRole("button", { name: "工作台" }));
+    expect(main.scrollTop).toBe(0);
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("工作台");
   });
 });

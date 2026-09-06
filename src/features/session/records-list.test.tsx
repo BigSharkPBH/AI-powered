@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as commands from "../../api/commands";
@@ -59,6 +59,7 @@ describe("RecordsList", () => {
   it("shows loading then empty state", async () => {
     render(<RecordsList />);
     expect(screen.getByRole("status").textContent).toContain("正在读取会话记录");
+    expect(screen.queryByText("还没有记录。")).toBeNull();
     expect(await screen.findByText("还没有记录。")).toBeTruthy();
   });
 
@@ -85,13 +86,18 @@ describe("RecordsList", () => {
 
     const { container } = render(<RecordsList />);
     expect(await screen.findByText("sess-1")).toBeTruthy();
-    expect(container.textContent).toContain("completed");
+    expect(container.textContent).toContain("已完成");
+    expect(screen.getByText("角色 role-1")).toBeTruthy();
+    expect(container.querySelector("time")?.getAttribute("datetime")).toBe("2026-09-05T10:00:00Z");
     fireEvent.click(screen.getByRole("button", { name: "查看" }));
     await waitFor(() => expect(commands.getSession).toHaveBeenCalledWith("sess-1"));
     expect(document.body.textContent).toContain("请介绍岗位");
     expect(document.body.textContent).toContain("这是一个后端岗位");
     expect(document.body.textContent).toContain("负责订单服务");
     expect(document.body.textContent).toContain("本轮未使用资料");
+    expect(within(screen.getByRole("region", { name: "用户内容" })).getByText("请介绍岗位")).toBeTruthy();
+    expect(within(screen.getByRole("region", { name: "AI 回复" })).getByText("这是一个后端岗位")).toBeTruthy();
+    expect(within(screen.getByRole("region", { name: "资料引用" })).getByText("负责订单服务")).toBeTruthy();
     expect(container.innerHTML).not.toMatch(/password|apiKey|apiSecret|credential/i);
   });
 
@@ -184,5 +190,35 @@ describe("RecordsList", () => {
     expect(container.innerHTML).not.toMatch(/\/api\//);
     expect(container.innerHTML).not.toContain("@tauri-apps/api");
     fetchSpy.mockRestore();
+  });
+
+  it("returns from an empty conversation to its existing list", async () => {
+    vi.mocked(commands.listSessions).mockResolvedValue({ ok: true, data: [summary()] });
+    vi.mocked(commands.getSession).mockResolvedValue({ ok: true, data: detail({ turns: [] }) });
+    render(<RecordsList />);
+    fireEvent.click(await screen.findByRole("button", { name: "查看" }));
+    expect(await screen.findByText("本次会话还没有对话内容。")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "返回列表" }));
+    expect(screen.queryByRole("region", { name: "会话详情" })).toBeNull();
+    expect(screen.getByRole("button", { name: "查看" })).toBeTruthy();
+    expect(commands.listSessions).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the actual update time and neutral text for missing metadata", async () => {
+    vi.mocked(commands.listSessions).mockResolvedValue({ ok: true, data: [summary({ startedAt: null, roleProfileId: "", status: "interrupted" })] });
+    const { container } = render(<RecordsList />);
+    expect(await screen.findByText("已中断")).toBeTruthy();
+    expect(screen.getByText("角色 未指定")).toBeTruthy();
+    expect(container.querySelector("time")?.getAttribute("datetime")).toBe("2026-09-05T10:05:00Z");
+  });
+
+  it("retains the list and re-enables its actions when opening a record fails", async () => {
+    vi.mocked(commands.listSessions).mockResolvedValue({ ok: true, data: [summary()] });
+    vi.mocked(commands.getSession).mockRejectedValue(new Error("ipc"));
+    render(<RecordsList />);
+    fireEvent.click(await screen.findByRole("button", { name: "查看" }));
+    expect(await screen.findByText("IPC_UNAVAILABLE：本地操作失败")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "查看" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByRole("region", { name: "会话详情" })).toBeNull();
   });
 });

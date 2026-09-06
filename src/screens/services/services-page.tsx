@@ -1,8 +1,11 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
+import { AudioLines, Boxes, Cable, Server } from "lucide-react";
 import * as api from "../../api/commands";
 import { EmbeddingEditor } from "../../features/services/embedding-editor";
 import { LiveKitEditor } from "../../features/services/livekit-editor";
 import type { CommandResult, PublicConfig, VoiceRouteMode } from "../../generated/bindings";
+import { PageShell } from "../page-shell";
+import "../../styles/configuration.css";
 
 const optional = (value: string) => value.trim() || null;
 const errorText = (error: { code: string; message: string; field?: string | null }) => `${error.field ? error.field + "：" : ""}${error.code}：${error.message}`;
@@ -22,8 +25,15 @@ const providerTestMessage = (error: { code: string; message: string; field?: str
 const initialRoute = { id: "", name: "", mode: "cascaded" as VoiceRouteMode, asrProviderId: "", asrModelId: "", llmProviderId: "", llmModelId: "", ttsProviderId: "", ttsModelId: "", voiceId: "", e2eProviderId: "", e2eModelId: "" };
 type MessageTone = "info" | "pending" | "success" | "error";
 type ProviderTestState = { tone: Exclude<MessageTone, "info">; text: string };
+const categories = [
+  { id: "providers", label: "模型供应商", icon: Server },
+  { id: "routes", label: "语音线路", icon: AudioLines },
+  { id: "embedding", label: "Embedding", icon: Boxes },
+  { id: "livekit", label: "LiveKit", icon: Cable },
+] as const;
 
 export function ServicesPage() {
+  const [category, setCategory] = useState<(typeof categories)[number]["id"]>("providers");
   const [config, setConfig] = useState<PublicConfig | null>(null);
   const [message, setMessage] = useState("正在读取本地配置…");
   const [messageTone, setMessageTone] = useState<MessageTone>("pending");
@@ -140,41 +150,52 @@ export function ServicesPage() {
   const providers = config?.models.providers ?? [];
   const setRouteField = (key: keyof typeof route, value: string) => setRoute((current) => ({ ...current, [key]: value }));
 
-  return <section className="services-page" aria-labelledby="page-heading-services">
-    <p className="page-eyebrow">本机配置</p><h1 id="page-heading-services">服务</h1>
-    <p className="services-intro">非敏感配置保存在本机；密钥仅保存到 Windows 凭据管理器。</p>
-    {message && <p className="services-message" data-tone={messageTone} role="status" aria-live="polite">{message}</p>}
-    <div className="services-grid">
-      <section className="service-panel">
-        <h2>模型供应商</h2>
-        <form className="service-form" onSubmit={submitProvider}>
+  return <div className="services-page">
+    <PageShell id="services" />
+    <div className="configuration-layout">
+      <nav className="settings-nav" aria-label="服务分类">
+        {categories.map(({ id, label, icon: Icon }) => <button key={id} id={`services-category-${id}`} type="button" aria-current={category === id ? "page" : undefined} aria-controls={`services-panel-${id}`} onClick={() => setCategory(id)}><Icon size={16} aria-hidden="true" />{label}</button>)}
+      </nav>
+      <div className="configuration-content">
+      {message && <p className="services-message" data-tone={messageTone} role="status" aria-live="polite">{message}</p>}
+      <section id="services-panel-providers" className="service-panel" hidden={category !== "providers"} aria-labelledby="services-category-providers">
+        <h2 className="section-heading">模型供应商</h2>
+        <p className="configuration-description">连接 OpenAI 兼容服务。密钥仅保存到 Windows 凭据管理器。</p>
+        <div className="configuration-columns">
+        <form className="service-form configuration-editor" onSubmit={submitProvider}>
+          <h3>{provider.id && providers.some((item) => item.id === provider.id) ? "编辑供应商" : "添加供应商"}</h3>
           <label>供应商 ID<input required pattern="[a-z0-9_-]+" value={provider.id} onChange={(e) => setProvider({ ...provider, id: e.target.value })}/></label>
           <label>显示名称<input value={provider.name} onChange={(e) => setProvider({ ...provider, name: e.target.value })}/></label>
           <label>接口基址<input required type="url" placeholder="https://example.com/v1" value={provider.baseUrl} onChange={(e) => setProvider({ ...provider, baseUrl: e.target.value })}/></label>
           <label>API Key<input type="password" autoComplete="new-password" value={provider.apiKey} onChange={(e) => setProvider({ ...provider, apiKey: e.target.value })}/><small>留空会保留已保存的密钥</small></label>
-          <button disabled={busy} type="submit">保存供应商</button>
+          <button className="button-primary" disabled={busy} type="submit">保存供应商</button>
         </form>
-        <div className="service-list">
-          {providers.length === 0 && <p>还没有供应商。</p>}
+        <div className="service-list configuration-list">
+          <h3>已配置供应商 <span className="configuration-count">{providers.length}</span></h3>
+          {providers.length === 0 && <p className="empty-state">还没有供应商。</p>}
           {providers.map((item) => <article className="service-card" key={item.id}>
             <h3>{item.name || item.id}</h3><p>{item.baseUrl}</p>
             <p>密钥：{item.credential?.configured ? "已安全保存" : "未配置"}</p>
-            {config?.models.activeProviderId === item.id && <strong>当前默认</strong>}
+            {config?.models.activeProviderId === item.id && <span className="status-badge">当前默认</span>}
             {providerTests[item.id] && <p className="service-test-result" data-tone={providerTests[item.id].tone} role="status">{providerTests[item.id].text}</p>}
             <div className="service-actions">
               <button aria-label={"编辑 " + (item.name || item.id)} disabled={busy} onClick={() => setProvider({ id: item.id, name: item.name ?? "", baseUrl: item.baseUrl, apiKey: "" })}>编辑</button>
               <button aria-label={"测试 " + (item.name || item.id)} disabled={busy} onClick={() => void testProvider(item.id)}>{providerTests[item.id]?.tone === "pending" ? "测试中…" : "测试"}</button>
               <button disabled={busy} onClick={() => void discover(item.id)}>发现模型</button>
               <button disabled={busy} onClick={() => void run(() => api.activateModelProvider(item.id), "默认供应商已更新")}>设为默认</button>
-              <button disabled={busy} onClick={() => void run(() => api.deleteModelProvider(item.id), "供应商已删除")}>删除</button>
+              <button className="button-danger" disabled={busy} onClick={() => void run(() => api.deleteModelProvider(item.id), "供应商已删除")}>删除</button>
             </div>
             {models[item.id]?.length > 0 && <p>模型：{models[item.id].join("、")}</p>}
           </article>)}
         </div>
+        </div>
       </section>
-      <section className="service-panel">
-        <h2>语音线路</h2>
-        <form className="service-form" onSubmit={submitRoute}>
+      <section id="services-panel-routes" className="service-panel" hidden={category !== "routes"} aria-labelledby="services-category-routes">
+        <h2 className="section-heading">语音线路</h2>
+        <p className="configuration-description">选择语音模型与音色，保存后先测试再启用。</p>
+        <div className="configuration-columns">
+        <form className="service-form configuration-editor" onSubmit={submitRoute}>
+          <h3>{route.id && config?.speech.voiceRoutes.some((item) => item.id === route.id) ? "编辑线路" : "添加线路"}</h3>
           <label>线路 ID<input required pattern="[a-z0-9_-]+" value={route.id} onChange={(e) => setRouteField("id", e.target.value)}/></label>
           <label>线路名称<input required value={route.name} onChange={(e) => setRouteField("name", e.target.value)}/></label>
           <label>模式<select value={route.mode} onChange={(e) => setRouteField("mode", e.target.value)}><option value="cascaded">级联 ASR → LLM → TTS</option><option value="e2e">端到端 Realtime</option></select></label>
@@ -184,13 +205,15 @@ export function ServicesPage() {
             <ProviderModelFields prefix="TTS" providers={providers} provider={route.ttsProviderId} model={route.ttsModelId} modelChoices={models[route.ttsProviderId] ?? []} onProvider={(v) => setRouteField("ttsProviderId", v)} onModel={(v) => setRouteField("ttsModelId", v)}/>
           </> : <ProviderModelFields prefix="Realtime" providers={providers} provider={route.e2eProviderId} model={route.e2eModelId} modelChoices={models[route.e2eProviderId] ?? []} onProvider={(v) => setRouteField("e2eProviderId", v)} onModel={(v) => setRouteField("e2eModelId", v)}/>}
           <label>音色 ID（可选）<input value={route.voiceId} onChange={(e) => setRouteField("voiceId", e.target.value)}/></label>
-          <button disabled={busy || providers.length === 0} type="submit">保存语音线路</button>
+          {providers.length === 0 && <p className="muted">请先在“模型供应商”中添加服务。</p>}
+          <button className="button-primary" disabled={busy || providers.length === 0} type="submit">保存语音线路</button>
         </form>
-        <div className="service-list">
-          {(config?.speech.voiceRoutes ?? []).length === 0 && <p>还没有语音线路。</p>}
+        <div className="service-list configuration-list">
+          <h3>已配置线路 <span className="configuration-count">{config?.speech.voiceRoutes.length ?? 0}</span></h3>
+          {(config?.speech.voiceRoutes ?? []).length === 0 && <p className="empty-state">还没有语音线路。</p>}
           {config?.speech.voiceRoutes.map((item) => <article className="service-card" key={item.id}>
             <h3>{item.name}</h3><p>{item.mode === "cascaded" ? "级联" : "端到端"} · {item.ready ? "测试通过" : "尚未就绪"}</p>
-            {item.active && <strong>当前启用</strong>}
+            {item.active && <span className="status-badge">当前启用</span>}
             <div className="service-actions">
               <button aria-label={"编辑 " + item.name} disabled={busy} onClick={() => setRoute({
                 id: item.id, name: item.name, mode: item.mode,
@@ -202,15 +225,17 @@ export function ServicesPage() {
               })}>编辑</button>
               <button disabled={busy} onClick={() => void run(() => api.testSpeechRoute(item.id), "线路测试通过")}>测试</button>
               <button disabled={busy || !item.ready} onClick={() => void run(() => api.activateSpeechRoute(item.id), "语音线路已启用")}>启用</button>
-              <button disabled={busy} onClick={() => void run(() => api.deleteSpeechRoute(item.id), "语音线路已删除")}>删除</button>
+              <button className="button-danger" disabled={busy} onClick={() => void run(() => api.deleteSpeechRoute(item.id), "语音线路已删除")}>删除</button>
             </div>
           </article>)}
         </div>
+        </div>
       </section>
+      <section id="services-panel-embedding" hidden={category !== "embedding"} aria-labelledby="services-category-embedding"><EmbeddingEditor /></section>
+      <section id="services-panel-livekit" hidden={category !== "livekit"} aria-labelledby="services-category-livekit"><LiveKitEditor /></section>
+      </div>
     </div>
-    <EmbeddingEditor />
-    <LiveKitEditor />
-  </section>;
+  </div>;
 }
 
 function ProviderModelFields(props: { prefix: string; providers: PublicConfig["models"]["providers"]; provider: string; model: string; modelChoices: string[]; onProvider: (value: string) => void; onModel: (value: string) => void }) {

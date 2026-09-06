@@ -1,4 +1,4 @@
-import type { ComponentType } from "react";
+import { useEffect, useRef, type ComponentType } from "react";
 import { useHashLocation } from "wouter/use-hash-location";
 
 import { AppNav } from "../components/app-nav";
@@ -21,11 +21,15 @@ export function Shell() {
   const [location, setLocation] = useHashLocation();
   const current = parseHash(location);
   const Page = pages[current];
+  const mainRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (mainRef.current) mainRef.current.scrollTop = 0;
+  }, [current]);
   return (
     <div className="app-shell">
       <AppNav current={current} onNavigate={(id) => setLocation(`/${id}`)} />
-      <main className="app-main">
-        <Page />
+      <main className="app-main" ref={mainRef}>
+        <div className={`app-content app-content-${current}`}><Page /></div>
       </main>
     </div>
   );

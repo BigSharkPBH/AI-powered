@@ -125,6 +125,26 @@ describe("EmbeddingEditor", () => {
     );
   });
 
+  it("clears a custom endpoint key after saving without exposing it", async () => {
+    vi.mocked(commands.saveEmbeddingConfig).mockResolvedValue({
+      ok: true,
+      data: embedding({ providerId: "", baseUrl: "https://embed.test/v1" }),
+    });
+    render(<EmbeddingEditor />);
+    await screen.findByText("还没有 Embedding 配置。");
+    fireEvent.change(screen.getByLabelText("配置 ID"), { target: { value: "custom" } });
+    fireEvent.change(screen.getByLabelText("接口基址"), { target: { value: "https://embed.test/v1" } });
+    fireEvent.change(screen.getByLabelText("模型"), { target: { value: "embed-model" } });
+    const key = screen.getByLabelText(/API Key/) as HTMLInputElement;
+    fireEvent.change(key, { target: { value: "embedding-secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存 Embedding" }));
+    await waitFor(() => expect(commands.saveEmbeddingConfig).toHaveBeenCalledWith(expect.objectContaining({
+      providerId: "", baseUrl: "https://embed.test/v1", apiKey: "embedding-secret",
+    })));
+    await waitFor(() => expect(key.value).toBe(""));
+    expect(document.body.textContent).not.toContain("embedding-secret");
+  });
+
   it("disables after a failed retest and can delete", async () => {
     const failed = embedding({ ready: false, status: "test_failed", active: false });
     vi.mocked(commands.getConfigPublic).mockResolvedValue({

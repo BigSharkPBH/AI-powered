@@ -19,7 +19,7 @@ describe("AppNav", () => {
     expect(buttons[1].textContent).toBe("资料");
     expect(buttons[2].textContent).toBe("记录");
     expect(buttons[3].textContent).toBe("服务");
-    expect(buttons[4].textContent).toBe("设置与诊断");
+    expect(buttons[4].textContent).toBe("设置");
   });
 
   it("marks the current route button with aria-current and data-active", () => {

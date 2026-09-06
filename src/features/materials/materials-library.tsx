@@ -1,10 +1,18 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
+import { ChevronDown, FileText, FolderOpen, RefreshCw, Search, Trash2, Upload } from "lucide-react";
 
 import * as api from "../../api/commands";
 import type { CommandResult, MaterialSearchHit, MaterialSummary } from "../../generated/bindings";
+import "../../styles/library.css";
 
 const errorText = (error: { code: string; message: string; field?: string | null }) =>
   `${error.field ? error.field + "：" : ""}${error.code}：${error.message}`;
+
+const materialStatus: Record<string, string> = {
+  text_ready: "文本就绪",
+  vector_ready: "已建索引",
+  failed: "处理失败",
+};
 
 export interface MaterialsLibraryProps {
   selectPath?: () => Promise<string | null>;
@@ -18,12 +26,15 @@ export function MaterialsLibrary({ selectPath }: MaterialsLibraryProps) {
   const [path, setPath] = useState("");
   const [query, setQuery] = useState("");
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const [hasSearched, setHasSearched] = useState(false);
 
   const reload = useCallback(async () => {
     try {
       const result = await api.listMaterials();
       if (result.ok) {
         setItems(result.data);
+        setLoaded(true);
         setMessage("");
       } else {
         setMessage(errorText(result.error));
@@ -72,6 +83,7 @@ export function MaterialsLibrary({ selectPath }: MaterialsLibraryProps) {
         return;
       }
       setHits(result.data);
+      setHasSearched(true);
       setMessage("");
     } catch {
       setMessage("IPC_UNAVAILABLE：本地操作失败");
@@ -88,63 +100,105 @@ export function MaterialsLibrary({ selectPath }: MaterialsLibraryProps) {
 
   return (
     <section className="service-panel materials-library" aria-labelledby="materials-library-heading">
-      <h2 id="materials-library-heading">资料库</h2>
+      <div className="library-heading">
+        <h2 id="materials-library-heading">资料库</h2>
+        {loaded && <span className="muted">{items.length} 份资料</span>}
+      </div>
       {message && (
         <p className="services-message" role="status">
           {message}
         </p>
       )}
-      <form className="service-form" onSubmit={submitImport}>
-        <label>
-          文件路径
-          <input type="text" value={path} onChange={(event) => setPath(event.target.value)} />
-        </label>
-        {selectPath && (
-          <button disabled={busy} type="button" onClick={() => void pickPath()}>
-            选择文件
+      <div className="library-toolbar">
+        <form className="service-form library-search" role="search" aria-label="搜索资料" onSubmit={submitSearch}>
+          <label className="library-search-field">
+            <span className="library-sr-only">检索词</span>
+            <Search size={16} aria-hidden="true" />
+            <input value={query} placeholder="搜索资料内容…" onChange={(event) => setQuery(event.target.value)} />
+          </label>
+          <button className="button-primary" disabled={busy} type="submit">
+            搜索
           </button>
-        )}
-        <button disabled={busy} type="submit">
-          导入
-        </button>
+        </form>
         <button
+          className="button-ghost"
           disabled={busy}
           type="button"
           onClick={() => void run(() => api.indexMaterials(), "索引已重建")}
         >
+          <RefreshCw size={16} aria-hidden="true" />
           重建索引
         </button>
-      </form>
-      <form className="service-form" onSubmit={submitSearch}>
-        <label>
-          检索词
-          <input value={query} onChange={(event) => setQuery(event.target.value)} />
-        </label>
-        <button disabled={busy} type="submit">
-          搜索
-        </button>
-      </form>
-      {hits.length > 0 && (
-        <div className="service-list" aria-label="检索结果">
+      </div>
+      <details className="library-import">
+        <summary>
+          <Upload size={16} aria-hidden="true" />
+          导入资料
+          <ChevronDown className="library-disclosure-icon" size={16} aria-hidden="true" />
+        </summary>
+        <form className="service-form library-import-form" onSubmit={submitImport}>
+          <label>
+            文件路径
+            <input type="text" value={path} placeholder="输入本地文件的完整路径" onChange={(event) => setPath(event.target.value)} />
+          </label>
+          <div className="service-actions">
+            {selectPath && (
+              <button className="button-ghost" disabled={busy} type="button" onClick={() => void pickPath()}>
+                <FolderOpen size={16} aria-hidden="true" />
+                选择文件
+              </button>
+            )}
+            <button className="button-primary" disabled={busy} type="submit">
+              导入
+            </button>
+          </div>
+        </form>
+      </details>
+      {hasSearched && (
+        <section className="library-results" aria-labelledby="material-results-heading">
+          <div className="library-heading">
+            <h3 id="material-results-heading">检索结果</h3>
+            <span className="muted">{hits.length} 个片段</span>
+          </div>
+          {hits.length === 0 && <p className="empty-state">未找到匹配内容，试试其他关键词。</p>}
           {hits.map((item) => (
-            <article className="service-card" key={item.chunkId}>
-              <h3>{item.fileName}</h3>
-              <p>{item.section}</p>
-              <p>{item.snippet}</p>
+            <article className="library-search-hit" key={item.chunkId}>
+              <div className="library-hit-source">
+                <FileText size={15} aria-hidden="true" />
+                <span className="muted">来源</span>
+                <h4>{item.fileName}</h4>
+                {item.section && <span className="muted">{item.section}</span>}
+              </div>
+              <p className="library-snippet">{item.snippet}</p>
             </article>
           ))}
-        </div>
+        </section>
       )}
-      <div className="service-list">
-        {items.length === 0 && <p>还没有资料。</p>}
+      <div className="library-rows" aria-label="已导入资料" aria-busy={busy}>
+        {loaded && items.length === 0 && (
+          <div className="empty-state library-empty">
+            <FolderOpen size={28} aria-hidden="true" />
+            <p>还没有资料。</p>
+            <span className="muted">导入本地文件，让助手参考你的资料回答。</span>
+          </div>
+        )}
         {items.map((item) => (
-          <article className="service-card" key={item.id}>
-            <h3>{item.fileName}</h3>
-            <p>{item.status}</p>
-            <p>切片 {item.chunkCount}</p>
-            <div className="service-actions">
+          <article className="library-row" key={item.id} aria-label={item.fileName}>
+            <div className="library-file-icon"><FileText size={20} aria-hidden="true" /></div>
+            <div className="library-row-content">
+              <h3>{item.fileName}</h3>
+              <div className="library-meta">
+                <span className="status-badge" data-tone={item.status === "failed" ? "danger" : "neutral"}>
+                  {materialStatus[item.status] ?? item.status}
+                </span>
+                <span>{item.chunkCount} 个切片</span>
+              </div>
+            </div>
+            <div className="service-actions library-row-actions">
               <button
+                className={pendingDelete === item.id ? "button-danger" : "button-ghost"}
                 disabled={busy}
+                type="button"
                 onClick={() => {
                   if (pendingDelete !== item.id) {
                     setPendingDelete(item.id);
@@ -155,10 +209,11 @@ export function MaterialsLibrary({ selectPath }: MaterialsLibraryProps) {
                   });
                 }}
               >
+                <Trash2 size={15} aria-hidden="true" />
                 {pendingDelete === item.id ? "确认删除" : "删除"}
               </button>
               {pendingDelete === item.id && (
-                <button disabled={busy} type="button" onClick={() => setPendingDelete(null)}>
+                <button className="button-ghost" disabled={busy} type="button" onClick={() => setPendingDelete(null)}>
                   取消
                 </button>
               )}

@@ -12,7 +12,7 @@ describe("shell CSS contract", () => {
     expect(shellCss).toContain(".app-shell");
     expect(shellCss).toContain(".app-nav");
     expect(shellCss).toContain(".app-main");
-    expect(shellCss).toContain(".page-placeholder");
+    expect(shellCss).toContain(".page-header");
   });
 
   it("shell.css does not use !important", () => {
