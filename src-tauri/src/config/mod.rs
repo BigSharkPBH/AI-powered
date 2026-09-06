@@ -191,7 +191,12 @@ pub type RoleProfile = RoleProfileConfig;
 #[ts(rename_all = "camelCase")]
 pub struct EmbeddingConfig {
     pub id: String,
+    #[serde(default)]
     pub provider_id: String,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub credential: Option<SecretSlot>,
     pub model_id: String,
     pub dimensions: u32,
     pub distance: EmbeddingDistance,
@@ -715,16 +720,33 @@ impl AppConfigV1 {
                     "Embedding fields are invalid",
                 ));
             }
-            if !self
-                .models
-                .providers
-                .iter()
-                .any(|provider| provider.id == embedding.provider_id)
-            {
-                return Err(ConfigError::new(
-                    "CONFIG_REFERENCE_MISSING",
-                    "Embedding provider does not exist",
-                ));
+            let provider_id = embedding.provider_id.trim();
+            let base_url = embedding
+                .base_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            match (provider_id.is_empty(), base_url) {
+                (false, None) => {
+                    if !self
+                        .models
+                        .providers
+                        .iter()
+                        .any(|provider| provider.id == provider_id)
+                    {
+                        return Err(ConfigError::new(
+                            "CONFIG_REFERENCE_MISSING",
+                            "Embedding provider does not exist",
+                        ));
+                    }
+                }
+                (true, Some(url)) => validate_url(url, &["http", "https"])?,
+                _ => {
+                    return Err(ConfigError::new(
+                        "CONFIG_FIELD_INVALID",
+                        "Embedding must use a provider or a custom URL",
+                    ));
+                }
             }
         }
         let active_embeddings = self

@@ -9,10 +9,14 @@ const errorText = (error: { code: string; message: string; field?: string | null
 const emptyEmbedding = {
   id: "",
   providerId: "",
+  baseUrl: "",
+  apiKey: "",
   modelId: "",
   dimensions: "1536",
   normalized: true,
 };
+
+const optional = (value: string) => value.trim() || null;
 
 export function EmbeddingEditor() {
   const [config, setConfig] = useState<PublicConfig | null>(null);
@@ -60,26 +64,34 @@ export function EmbeddingEditor() {
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    await run(
-      () =>
-        api.saveEmbeddingConfig({
-          id: embedding.id.trim(),
-          providerId: embedding.providerId.trim(),
-          modelId: embedding.modelId.trim(),
-          dimensions: Number(embedding.dimensions),
-          normalized: embedding.normalized,
-        }),
-      "Embedding 配置已保存，请先测试再启用",
-    );
+    const usingProvider = Boolean(embedding.providerId.trim());
+    try {
+      await run(
+        () =>
+          api.saveEmbeddingConfig({
+            id: embedding.id.trim(),
+            providerId: embedding.providerId.trim(),
+            baseUrl: usingProvider ? null : optional(embedding.baseUrl),
+            apiKey: usingProvider ? null : optional(embedding.apiKey),
+            modelId: embedding.modelId.trim(),
+            dimensions: Number(embedding.dimensions),
+            normalized: embedding.normalized,
+          }),
+        "Embedding 配置已保存，请先测试再启用",
+      );
+    } finally {
+      setEmbedding((current) => ({ ...current, apiKey: "" }));
+    }
   }
 
   const providers = config?.models.providers ?? [];
   const items = config?.knowledge.embeddingConfigs ?? [];
+  const usingProvider = Boolean(embedding.providerId.trim());
 
   return (
     <section className="service-panel embedding-editor" aria-labelledby="embedding-editor-heading">
       <h2 id="embedding-editor-heading">Embedding</h2>
-      <p>测试、切片和查询文本会发送到所选供应商的 Embedding 接口，不会经过作者服务器。</p>
+      <p>可以选用已保存的供应商，或自行填写 OpenAI 兼容接入地址。测试、切片和查询文本会发到该接口，不会经过作者服务器。</p>
       {message && (
         <p className="services-message" role="status">
           {message}
@@ -98,11 +110,10 @@ export function EmbeddingEditor() {
         <label>
           供应商
           <select
-            required
             value={embedding.providerId}
-            onChange={(event) => setEmbedding({ ...embedding, providerId: event.target.value })}
+            onChange={(event) => setEmbedding({ ...embedding, providerId: event.target.value, apiKey: "" })}
           >
-            <option value="">请选择</option>
+            <option value="">不使用供应商，自行填写地址</option>
             {providers.map((item) => (
               <option key={item.id} value={item.id}>
                 {item.name || item.id}
@@ -110,6 +121,30 @@ export function EmbeddingEditor() {
             ))}
           </select>
         </label>
+        {!usingProvider && (
+          <>
+            <label>
+              接口基址
+              <input
+                required
+                type="url"
+                placeholder="http://127.0.0.1:8080/v1"
+                value={embedding.baseUrl}
+                onChange={(event) => setEmbedding({ ...embedding, baseUrl: event.target.value })}
+              />
+            </label>
+            <label>
+              API Key
+              <input
+                type="password"
+                autoComplete="new-password"
+                value={embedding.apiKey}
+                onChange={(event) => setEmbedding({ ...embedding, apiKey: event.target.value })}
+              />
+              <small>留空会保留已保存的密钥；无鉴权可留空</small>
+            </label>
+          </>
+        )}
         <label>
           模型
           <input
@@ -141,7 +176,7 @@ export function EmbeddingEditor() {
           />
           归一化向量
         </label>
-        <button disabled={busy || providers.length === 0} type="submit">
+        <button disabled={busy} type="submit">
           保存 Embedding
         </button>
       </form>
@@ -151,7 +186,7 @@ export function EmbeddingEditor() {
           <article className="service-card" key={item.id}>
             <h3>{item.id}</h3>
             <p>
-              {item.providerId} · {item.modelId} · {item.dimensions} 维 · cosine
+              {item.providerId || item.baseUrl || "自定义"} · {item.modelId} · {item.dimensions} 维 · cosine
             </p>
             <p>{item.ready ? "测试通过" : "尚未就绪"}</p>
             {item.active && <strong>当前启用</strong>}
@@ -163,6 +198,8 @@ export function EmbeddingEditor() {
                   setEmbedding({
                     id: item.id,
                     providerId: item.providerId,
+                    baseUrl: item.baseUrl ?? "",
+                    apiKey: "",
                     modelId: item.modelId,
                     dimensions: String(item.dimensions),
                     normalized: item.normalized,

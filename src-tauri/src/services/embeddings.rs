@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
+use zeroize::Zeroizing;
 
 use crate::{
-    config::{ConfigError, ConfigStore, EmbeddingConfig, EmbeddingDistance},
+    config::{ConfigError, ConfigStore, EmbeddingConfig, EmbeddingDistance, ModelConfig, SecretSlot},
     providers::{EmbeddingError, EmbeddingProbe, ProviderEndpoint},
     secrets::{SecretError, SecretService},
 };
@@ -14,7 +15,12 @@ const TEST_INPUT: &str = "AI Virtual Assistant embedding connectivity test";
 #[ts(rename_all = "camelCase")]
 pub struct EmbeddingConfigSaveInput {
     pub id: String,
+    #[serde(default)]
     pub provider_id: String,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
     pub model_id: String,
     pub dimensions: u32,
     pub normalized: bool,
@@ -33,12 +39,15 @@ pub struct EmbeddingTestResult {
 pub enum EmbeddingServiceError {
     InvalidId,
     FieldsInvalid,
+    SourceInvalid,
     NotFound,
     NotReady,
     Stale,
     Config(ConfigError),
     Secret(SecretError),
     Embedding(EmbeddingError),
+    CredentialRollback,
+    CredentialCleanup,
 }
 
 impl EmbeddingServiceError {
@@ -46,13 +55,66 @@ impl EmbeddingServiceError {
         match self {
             Self::InvalidId => "EMBEDDING_ID_INVALID",
             Self::FieldsInvalid => "EMBEDDING_FIELDS_INVALID",
+            Self::SourceInvalid => "EMBEDDING_SOURCE_INVALID",
             Self::NotFound => "EMBEDDING_NOT_FOUND",
             Self::NotReady => "EMBEDDING_NOT_READY",
             Self::Stale => "EMBEDDING_STALE",
             Self::Config(error) => error.code(),
             Self::Secret(error) => error.code(),
             Self::Embedding(error) => error.code(),
+            Self::CredentialRollback => "SECRET_ROLLBACK_FAILED",
+            Self::CredentialCleanup => "SECRET_CLEANUP_FAILED",
         }
+    }
+}
+
+pub fn embedding_endpoint(
+    models: &ModelConfig,
+    embedding: &EmbeddingConfig,
+) -> Option<ProviderEndpoint> {
+    let provider_id = embedding.provider_id.trim();
+    if !provider_id.is_empty() {
+        return models.providers.iter().find_map(|provider| {
+            (provider.id == provider_id && !provider.base_url.trim().is_empty()).then(|| {
+                ProviderEndpoint {
+                    provider_id: provider.id.clone(),
+                    base_url: provider.base_url.clone(),
+                }
+            })
+        });
+    }
+    embedding
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(|url| ProviderEndpoint {
+            provider_id: embedding.id.clone(),
+            base_url: url.to_owned(),
+        })
+}
+
+pub fn embedding_credential_slot<'a>(
+    models: &'a ModelConfig,
+    embedding: &'a EmbeddingConfig,
+) -> Option<&'a SecretSlot> {
+    let provider_id = embedding.provider_id.trim();
+    if !provider_id.is_empty() {
+        return models.providers.iter().find_map(|provider| {
+            (provider.id == provider_id)
+                .then(|| provider.credential.as_ref().filter(|slot| slot.configured))
+                .flatten()
+        });
+    }
+    embedding.credential.as_ref().filter(|slot| slot.configured)
+}
+
+pub fn embedding_space_provider_id(embedding: &EmbeddingConfig) -> String {
+    let provider_id = embedding.provider_id.trim();
+    if provider_id.is_empty() {
+        format!("custom:{}", embedding.id)
+    } else {
+        provider_id.to_owned()
     }
 }
 
@@ -77,71 +139,115 @@ impl<'a> EmbeddingService<'a> {
 
     pub fn save(
         &self,
-        input: EmbeddingConfigSaveInput,
+        mut input: EmbeddingConfigSaveInput,
     ) -> Result<EmbeddingConfig, EmbeddingServiceError> {
-        let input = EmbeddingConfigSaveInput {
-            id: input.id.trim().into(),
-            provider_id: input.provider_id.trim().into(),
-            model_id: input.model_id.trim().into(),
-            dimensions: input.dimensions,
-            normalized: input.normalized,
-        };
-        validate_id(&input.id)?;
-        validate_id(&input.provider_id)?;
-        if input.model_id.is_empty() || !(1..=65_536).contains(&input.dimensions) {
+        let id = input.id.trim().to_owned();
+        let provider_id = input.provider_id.trim().to_owned();
+        let base_url = input
+            .base_url
+            .take()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        let model_id = input.model_id.trim().to_owned();
+        validate_id(&id)?;
+        if model_id.is_empty() || !(1..=65_536).contains(&input.dimensions) {
             return Err(EmbeddingServiceError::FieldsInvalid);
         }
+        match (provider_id.is_empty(), base_url.is_some()) {
+            (false, false) => validate_id(&provider_id)?,
+            (true, true) => {}
+            _ => return Err(EmbeddingServiceError::SourceInvalid),
+        }
+
+        let reference = credential_reference(&id);
+        let old_secret = self
+            .secrets
+            .read(&reference)
+            .map_err(EmbeddingServiceError::Secret)?;
+        let submitted = input
+            .api_key
+            .take()
+            .filter(|value| !value.trim().is_empty())
+            .map(Zeroizing::new);
+        let mut key_changed = false;
+        if provider_id.is_empty() {
+            if let Some(value) = submitted.as_deref() {
+                self.secrets
+                    .set(&reference, value)
+                    .map_err(EmbeddingServiceError::Secret)?;
+                key_changed = true;
+            }
+        }
+        let custom_configured = provider_id.is_empty() && (key_changed || old_secret.is_some());
+
         let mut saved = None;
-        self.config
-            .update(|config| {
-                if !config
+        let result = self.config.update(|config| {
+            if !provider_id.is_empty()
+                && !config
                     .models
                     .providers
                     .iter()
-                    .any(|provider| provider.id == input.provider_id)
-                {
-                    return Err(ConfigError::new(
-                        "CONFIG_REFERENCE_MISSING",
-                        "Embedding provider does not exist",
-                    ));
+                    .any(|provider| provider.id == provider_id)
+            {
+                return Err(ConfigError::new(
+                    "CONFIG_REFERENCE_MISSING",
+                    "Embedding provider does not exist",
+                ));
+            }
+            let config_version = config
+                .knowledge
+                .embedding_configs
+                .iter()
+                .find(|item| item.id == id)
+                .map(|item| item.config_version.saturating_add(1))
+                .unwrap_or(1);
+            let embedding = EmbeddingConfig {
+                id: id.clone(),
+                provider_id: provider_id.clone(),
+                base_url: base_url.clone(),
+                credential: custom_configured.then(|| SecretSlot {
+                    reference: reference.clone(),
+                    configured: true,
+                }),
+                model_id: model_id.clone(),
+                dimensions: input.dimensions,
+                distance: EmbeddingDistance::Cosine,
+                normalized: input.normalized,
+                active: false,
+                ready: false,
+                status: Some("not_tested".into()),
+                config_version,
+            };
+            if let Some(existing) = config
+                .knowledge
+                .embedding_configs
+                .iter_mut()
+                .find(|item| item.id == embedding.id)
+            {
+                *existing = embedding.clone();
+            } else {
+                config.knowledge.embedding_configs.push(embedding.clone());
+            }
+            if config.knowledge.active_embedding_config_id.as_deref() == Some(&embedding.id) {
+                config.knowledge.active_embedding_config_id = None;
+            }
+            saved = Some(embedding);
+            Ok(())
+        });
+        match result {
+            Ok(_) => saved.ok_or(EmbeddingServiceError::NotFound),
+            Err(error) => {
+                if key_changed {
+                    rollback_secret(
+                        self.secrets,
+                        &reference,
+                        old_secret.as_deref().map(String::as_str),
+                    )
+                    .map_err(|_| EmbeddingServiceError::CredentialRollback)?;
                 }
-                let config_version = config
-                    .knowledge
-                    .embedding_configs
-                    .iter()
-                    .find(|item| item.id == input.id)
-                    .map(|item| item.config_version.saturating_add(1))
-                    .unwrap_or(1);
-                let embedding = EmbeddingConfig {
-                    id: input.id.clone(),
-                    provider_id: input.provider_id.clone(),
-                    model_id: input.model_id.clone(),
-                    dimensions: input.dimensions,
-                    distance: EmbeddingDistance::Cosine,
-                    normalized: input.normalized,
-                    active: false,
-                    ready: false,
-                    status: Some("not_tested".into()),
-                    config_version,
-                };
-                if let Some(existing) = config
-                    .knowledge
-                    .embedding_configs
-                    .iter_mut()
-                    .find(|item| item.id == embedding.id)
-                {
-                    *existing = embedding.clone();
-                } else {
-                    config.knowledge.embedding_configs.push(embedding.clone());
-                }
-                if config.knowledge.active_embedding_config_id.as_deref() == Some(&embedding.id) {
-                    config.knowledge.active_embedding_config_id = None;
-                }
-                saved = Some(embedding);
-                Ok(())
-            })
-            .map_err(map_config_error)?;
-        saved.ok_or(EmbeddingServiceError::NotFound)
+                Err(map_config_error(error))
+            }
+        }
     }
 
     pub fn test(&self, embedding_id: &str) -> Result<EmbeddingTestResult, EmbeddingServiceError> {
@@ -153,34 +259,19 @@ impl<'a> EmbeddingService<'a> {
             .find(|item| item.id == embedding_id)
             .cloned()
             .ok_or(EmbeddingServiceError::NotFound)?;
-        let provider = config
-            .models
-            .providers
-            .iter()
-            .find(|provider| provider.id == embedding.provider_id)
-            .ok_or(EmbeddingServiceError::FieldsInvalid)?;
-        let credential = provider
-            .credential
-            .as_ref()
-            .filter(|slot| slot.configured)
+        let endpoint = embedding_endpoint(&config.models, &embedding).ok_or(EmbeddingServiceError::SourceInvalid)?;
+        let slot = embedding_credential_slot(&config.models, &embedding);
+        let credential = slot
             .map(|slot| self.secrets.read(&slot.reference))
             .transpose()
             .map_err(EmbeddingServiceError::Secret)?
             .flatten();
-        if provider
-            .credential
-            .as_ref()
-            .is_some_and(|slot| slot.configured)
-            && credential.is_none()
-        {
+        if slot.is_some() && credential.is_none() {
             mark_test_failed(self.config, embedding_id)?;
             return Err(EmbeddingServiceError::Secret(SecretError::Backend));
         }
         let vector = match self.probe.embed(
-            &ProviderEndpoint {
-                provider_id: provider.id.clone(),
-                base_url: provider.base_url.clone(),
-            },
+            &endpoint,
             credential.as_deref().map(String::as_str),
             &embedding.model_id,
             embedding.dimensions,
@@ -280,8 +371,28 @@ impl<'a> EmbeddingService<'a> {
                 Ok(())
             })
             .map_err(map_config_error)?;
+        self.secrets
+            .delete(&credential_reference(embedding_id))
+            .map_err(|_| EmbeddingServiceError::CredentialCleanup)?;
         Ok(())
     }
+}
+
+fn credential_reference(embedding_id: &str) -> String {
+    format!("embeddings/{embedding_id}/api-key")
+}
+
+fn rollback_secret(
+    secrets: &SecretService,
+    reference: &str,
+    prior: Option<&str>,
+) -> Result<(), SecretError> {
+    if let Some(prior) = prior {
+        secrets.set(reference, prior)?;
+    } else {
+        secrets.delete(reference)?;
+    }
+    Ok(())
 }
 
 fn validate_id(id: &str) -> Result<(), EmbeddingServiceError> {

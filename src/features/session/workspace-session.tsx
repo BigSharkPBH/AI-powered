@@ -355,6 +355,10 @@ export function WorkspaceSession({
 
   async function submitFinalize(event: FormEvent) {
     event.preventDefault();
+    if (!ACTIVE_PHASES.has(phase)) {
+      setMessage("还没有开始会话，请先点开始");
+      return;
+    }
     setBusy(true);
     try {
       await finalizeUtterance(utterance.trim());
@@ -380,6 +384,7 @@ export function WorkspaceSession({
       )}
       <p>阶段 {phase}</p>
       <p>模式 {mode}</p>
+      {phase === "idle" && <p className="session-idle-hint">还没有会话。请点下面的「开始会话」。</p>}
       <fieldset>
         <legend>传输</legend>
         <label>
@@ -407,8 +412,8 @@ export function WorkspaceSession({
       </fieldset>
       {livekitState !== "idle" && <p>LiveKit {livekitState}</p>}
       <div className="service-actions">
-        <button disabled={busy || active} type="button" onClick={() => void start()}>
-          开始
+        <button className="session-start" disabled={busy || active} type="button" onClick={() => void start()}>
+          开始会话
         </button>
         <button disabled={!active} type="button" onClick={() => void stop()}>
           停止
@@ -431,7 +436,7 @@ export function WorkspaceSession({
           测试语句
           <input value={utterance} onChange={(event) => setUtterance(event.target.value)} />
         </label>
-        <button disabled={busy} type="submit">
+        <button disabled={busy || !active} type="submit">
           提交语句
         </button>
       </form>

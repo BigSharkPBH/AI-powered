@@ -106,6 +106,44 @@ describe("ServicesPage", () => {
     expect((screen.getAllByLabelText(/API Key/)[0] as HTMLInputElement).value).toBe("");
   });
 
+  it("shows provider test progress then a success count", async () => {
+    let finishTest: (result: Awaited<ReturnType<typeof commands.testModelProvider>>) => void = () => undefined;
+    vi.mocked(commands.getConfigPublic).mockResolvedValue({
+      ok: true,
+      data: {
+        ...emptyConfig,
+        models: { providers: [{ id: "openai", name: "OpenAI", baseUrl: "https://example.test/v1", credential: { reference: "providers/openai/api-key", configured: true } }], activeProviderId: null },
+      },
+    });
+    vi.mocked(commands.testModelProvider).mockImplementation(
+      () => new Promise((resolve) => {
+        finishTest = resolve;
+      }),
+    );
+    render(<ServicesPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "测试 OpenAI" }));
+    expect(await screen.findAllByText("正在测试连接…")).not.toHaveLength(0);
+    finishTest({ ok: true, data: { providerId: "openai", reachable: true, modelCount: 3 } });
+    expect(await screen.findAllByText("连接测试通过，发现 3 个模型")).not.toHaveLength(0);
+  });
+
+  it("shows a provider test failure on the card and status line", async () => {
+    vi.mocked(commands.getConfigPublic).mockResolvedValue({
+      ok: true,
+      data: {
+        ...emptyConfig,
+        models: { providers: [{ id: "openai", name: "OpenAI", baseUrl: "https://example.test/v1", credential: { reference: "providers/openai/api-key", configured: true } }], activeProviderId: null },
+      },
+    });
+    vi.mocked(commands.testModelProvider).mockResolvedValue({
+      ok: false,
+      error: { code: "PROVIDER_TIMEOUT", message: "Provider operation failed", requestId: "test", retryable: true },
+    });
+    render(<ServicesPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "测试 OpenAI" }));
+    expect(await screen.findAllByText("连接超时，请检查接口基址或网络")).not.toHaveLength(0);
+  });
+
   it("offers discovered models to voice route fields", async () => {
     vi.mocked(commands.getConfigPublic).mockResolvedValue({
       ok: true,

@@ -13,7 +13,7 @@ use crate::{
         parser_version,
         store::sha256_hex,
     },
-    providers::{EmbeddingError, EmbeddingProbe, ProviderEndpoint},
+    providers::{EmbeddingError, EmbeddingProbe},
     secrets::{SecretError, SecretService},
 };
 
@@ -248,40 +248,25 @@ impl<'a> MaterialService<'a> {
         if !embedding.active {
             return Err(MaterialServiceError::EmbeddingNotReady);
         }
-        let provider = loaded
-            .models
-            .providers
-            .iter()
-            .find(|item| item.id == embedding.provider_id)
+        let endpoint = super::embedding_endpoint(&loaded.models, embedding)
             .ok_or(MaterialServiceError::EmbeddingFieldsInvalid)?;
-        if provider.base_url.trim().is_empty() {
+        if endpoint.base_url.trim().is_empty() {
             return Err(MaterialServiceError::EmbeddingFieldsInvalid);
         }
-        let credential = provider
-            .credential
-            .as_ref()
-            .filter(|slot| slot.configured)
+        let slot = super::embedding_credential_slot(&loaded.models, embedding);
+        let credential = slot
             .map(|slot| secrets.read(&slot.reference))
             .transpose()
             .map_err(MaterialServiceError::Secret)?
             .flatten();
-        if provider
-            .credential
-            .as_ref()
-            .is_some_and(|slot| slot.configured)
-            && credential.is_none()
-        {
+        if slot.is_some() && credential.is_none() {
             return Err(MaterialServiceError::Secret(SecretError::Backend));
         }
         let space = EmbeddingSpace {
-            provider_id: embedding.provider_id.clone(),
+            provider_id: super::embedding_space_provider_id(embedding),
             model_id: embedding.model_id.clone(),
             dimensions: embedding.dimensions,
             normalized: embedding.normalized,
-        };
-        let endpoint = ProviderEndpoint {
-            provider_id: provider.id.clone(),
-            base_url: provider.base_url.clone(),
         };
         hybrid::index_chunks_at(
             self.database,
@@ -1462,6 +1447,8 @@ mod tests {
             .save(EmbeddingConfigSaveInput {
                 id: "primary".into(),
                 provider_id: "openai".into(),
+                base_url: None,
+                api_key: None,
                 model_id: "embed-3".into(),
                 dimensions: 3,
                 normalized: true,

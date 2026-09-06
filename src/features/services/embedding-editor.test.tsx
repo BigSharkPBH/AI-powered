@@ -35,6 +35,8 @@ function embedding(overrides: Partial<EmbeddingConfig> = {}): EmbeddingConfig {
   return {
     id: "primary",
     providerId: "openai",
+    baseUrl: null,
+    credential: null,
     modelId: "embed-3",
     dimensions: 8,
     distance: "cosine",
@@ -68,7 +70,7 @@ describe("EmbeddingEditor", () => {
     vi.mocked(commands.activateEmbeddingConfig).mockResolvedValue({ ok: true, data: { ...ready, active: true } });
 
     render(<EmbeddingEditor />);
-    expect(await screen.findByText(/测试、切片和查询文本会发送到所选供应商/)).toBeTruthy();
+    expect(await screen.findByText(/可以选用已保存的供应商，或自行填写/)).toBeTruthy();
     fireEvent.change(screen.getByLabelText("配置 ID"), { target: { value: "primary" } });
     fireEvent.change(screen.getByLabelText("供应商"), { target: { value: "openai" } });
     fireEvent.change(screen.getByLabelText("模型"), { target: { value: "embed-3" } });
@@ -81,6 +83,8 @@ describe("EmbeddingEditor", () => {
       expect(commands.saveEmbeddingConfig).toHaveBeenCalledWith({
         id: "primary",
         providerId: "openai",
+        baseUrl: null,
+        apiKey: null,
         modelId: "embed-3",
         dimensions: 8,
         normalized: true,
@@ -93,6 +97,32 @@ describe("EmbeddingEditor", () => {
     await waitFor(() => expect((screen.getByRole("button", { name: "启用" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "启用" }));
     await waitFor(() => expect(commands.activateEmbeddingConfig).toHaveBeenCalledWith("primary"));
+  });
+
+  it("saves a custom URL when no provider is selected", async () => {
+    vi.mocked(commands.saveEmbeddingConfig).mockResolvedValue({
+      ok: true,
+      data: embedding({ providerId: "", baseUrl: "http://127.0.0.1:8080/v1" }),
+    });
+    render(<EmbeddingEditor />);
+    await screen.findByLabelText("配置 ID");
+    fireEvent.change(screen.getByLabelText("配置 ID"), { target: { value: "primary" } });
+    fireEvent.change(screen.getByLabelText("供应商"), { target: { value: "" } });
+    fireEvent.change(screen.getByLabelText("接口基址"), { target: { value: "http://127.0.0.1:8080/v1" } });
+    fireEvent.change(screen.getByLabelText("模型"), { target: { value: "BAAI/bge-m3" } });
+    fireEvent.change(screen.getByLabelText("维度"), { target: { value: "1024" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存 Embedding" }));
+    await waitFor(() =>
+      expect(commands.saveEmbeddingConfig).toHaveBeenCalledWith({
+        id: "primary",
+        providerId: "",
+        baseUrl: "http://127.0.0.1:8080/v1",
+        apiKey: null,
+        modelId: "BAAI/bge-m3",
+        dimensions: 1024,
+        normalized: true,
+      }),
+    );
   });
 
   it("disables after a failed retest and can delete", async () => {

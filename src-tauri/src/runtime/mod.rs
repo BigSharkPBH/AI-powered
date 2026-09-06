@@ -99,6 +99,8 @@ pub(crate) mod test_support {
                 embedding_configs: vec![EmbeddingConfig {
                     id: "emb-space".into(),
                     provider_id: "emb-1".into(),
+                    base_url: None,
+                    credential: None,
                     model_id: "bge".into(),
                     dimensions: 1024,
                     distance: EmbeddingDistance::Cosine,
@@ -158,6 +160,8 @@ pub(crate) mod test_support {
                 embedding_configs: vec![EmbeddingConfig {
                     id: "emb-space".into(),
                     provider_id: "emb-1".into(),
+                    base_url: None,
+                    credential: None,
                     model_id: "bge".into(),
                     dimensions: 1024,
                     distance: EmbeddingDistance::Cosine,

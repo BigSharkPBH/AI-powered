@@ -587,6 +587,8 @@ fn embedding_input(id: &str) -> EmbeddingConfigSaveInput {
     EmbeddingConfigSaveInput {
         id: id.into(),
         provider_id: "openai".into(),
+        base_url: None,
+        api_key: None,
         model_id: "embed-3".into(),
         dimensions: 3,
         normalized: true,
@@ -674,6 +676,60 @@ fn embedding_save_validates_provider_model_and_dimensions_and_resets_readiness()
             .active_embedding_config_id
             .is_none()
     );
+}
+
+#[test]
+fn embedding_save_accepts_custom_url_without_provider() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = ConfigStore::new(directory.path().join("config.json"));
+    config.restore_defaults().unwrap();
+    let secrets = SecretService::new("test", Arc::new(MemorySecretStore::default())).unwrap();
+    let calls = std::sync::Mutex::new(Vec::<(String, Option<String>)>::new());
+    struct CaptureProbe<'a>(&'a std::sync::Mutex<Vec<(String, Option<String>)>>);
+    impl EmbeddingProbe for CaptureProbe<'_> {
+        fn embed(
+            &self,
+            endpoint: &crate::providers::ProviderEndpoint,
+            credential: Option<&str>,
+            _: &str,
+            dimensions: u32,
+            _: &str,
+        ) -> Result<Vec<f32>, EmbeddingError> {
+            self.0
+                .lock()
+                .unwrap()
+                .push((endpoint.base_url.clone(), credential.map(str::to_owned)));
+            Ok(vec![0.1; dimensions as usize])
+        }
+    }
+    let probe = CaptureProbe(&calls);
+    let service = EmbeddingService::new(&config, &secrets, &probe);
+    assert_eq!(
+        service
+            .save(EmbeddingConfigSaveInput {
+                provider_id: String::new(),
+                base_url: None,
+                ..embedding_input("primary")
+            })
+            .unwrap_err()
+            .code(),
+        "EMBEDDING_SOURCE_INVALID"
+    );
+    let saved = service
+        .save(EmbeddingConfigSaveInput {
+            provider_id: String::new(),
+            base_url: Some("http://127.0.0.1:8080/v1".into()),
+            api_key: Some("custom-key".into()),
+            ..embedding_input("primary")
+        })
+        .unwrap();
+    assert!(saved.provider_id.is_empty());
+    assert_eq!(saved.base_url.as_deref(), Some("http://127.0.0.1:8080/v1"));
+    assert!(saved.credential.as_ref().is_some_and(|slot| slot.configured));
+    service.test("primary").unwrap();
+    let captured = calls.lock().unwrap();
+    assert_eq!(captured[0].0, "http://127.0.0.1:8080/v1");
+    assert_eq!(captured[0].1.as_deref(), Some("custom-key"));
 }
 
 #[test]

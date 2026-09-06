@@ -8,6 +8,7 @@ mod voice_routes;
 
 pub use embeddings::{
     EmbeddingConfigSaveInput, EmbeddingService, EmbeddingServiceError, EmbeddingTestResult,
+    embedding_credential_slot, embedding_endpoint, embedding_space_provider_id,
 };
 pub use livekit::{
     LiveKitJoinToken, LiveKitSettingsError, LiveKitSettingsSaveInput, LiveKitSettingsService,

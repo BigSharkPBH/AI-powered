@@ -248,7 +248,7 @@ fn embedding_service_error<T: ts_rs::TS>(error: EmbeddingServiceError) -> Comman
         | "EMBEDDING_NOT_READY"
         | "EMBEDDING_STALE" => Some("id"),
         "EMBEDDING_FIELDS_INVALID" => Some("dimensions"),
-        "CONFIG_REFERENCE_MISSING" => Some("providerId"),
+        "EMBEDDING_SOURCE_INVALID" | "CONFIG_REFERENCE_MISSING" => Some("providerId"),
         "CONFIG_URL_INVALID" | "EMBEDDING_ENDPOINT_INVALID" => Some("baseUrl"),
         _ => None,
     } {
@@ -623,6 +623,26 @@ fn read_provider_secret(
         return Ok(None);
     };
     let Some(slot) = provider.credential.as_ref().filter(|slot| slot.configured) else {
+        return Ok(None);
+    };
+    state.secrets.read(&slot.reference).map_err(|_| {
+        PublicError::new(
+            "SECRET_BACKEND_UNAVAILABLE",
+            "Secret backend is unavailable",
+            false,
+        )
+    })
+}
+
+fn read_embedding_secret(
+    state: &AppState,
+    config: &PublicConfig,
+    embedding: Option<&EmbeddingConfig>,
+) -> Result<Option<zeroize::Zeroizing<String>>, PublicError> {
+    let Some(embedding) = embedding else {
+        return Ok(None);
+    };
+    let Some(slot) = crate::services::embedding_credential_slot(&config.models, embedding) else {
         return Ok(None);
     };
     state.secrets.read(&slot.reference).map_err(|_| {
@@ -1184,11 +1204,7 @@ pub fn session_finalize_utterance_blocking<R: tauri::Runtime>(
         Ok(secret) => secret,
         Err(error) => return CommandResult::Err { error },
     };
-    let embed_secret = match read_provider_secret(
-        &state,
-        &config,
-        embedding.map(|item| item.provider_id.as_str()),
-    ) {
+    let embed_secret = match read_embedding_secret(&state, &config, embedding) {
         Ok(secret) => secret,
         Err(error) => return CommandResult::Err { error },
     };
@@ -1276,11 +1292,7 @@ pub fn session_agent_command_blocking<R: tauri::Runtime>(
         Ok(secret) => secret,
         Err(error) => return CommandResult::Err { error },
     };
-    let embed_secret = match read_provider_secret(
-        &state,
-        &config,
-        embedding.map(|item| item.provider_id.as_str()),
-    ) {
+    let embed_secret = match read_embedding_secret(&state, &config, embedding) {
         Ok(secret) => secret,
         Err(error) => return CommandResult::Err { error },
     };

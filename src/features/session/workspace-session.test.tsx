@@ -133,8 +133,12 @@ describe("WorkspaceSession", () => {
   it("shows loading then idle start controls", async () => {
     render(<WorkspaceSession />);
     expect(screen.getByRole("status").textContent).toContain("正在读取会话状态");
-    expect(await screen.findByRole("button", { name: "开始" })).toBeTruthy();
+    const start = await screen.findByRole("button", { name: "开始会话" });
+    expect(start).toBeTruthy();
+    expect((start as HTMLButtonElement).disabled).toBe(false);
+    expect(document.body.textContent).toContain("请点下面的「开始会话」");
     expect((screen.getByRole("button", { name: "停止" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "提交语句" }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByRole("heading", { name: "当前会话" })).toBeTruthy();
     expect(document.body.textContent).toContain("idle");
   });
@@ -145,10 +149,10 @@ describe("WorkspaceSession", () => {
       .mockResolvedValue({ ok: true, data: status({ phase: "listening", seq: 2 }) });
 
     render(<WorkspaceSession />);
-    fireEvent.click(await screen.findByRole("button", { name: "开始" }));
+    fireEvent.click(await screen.findByRole("button", { name: "开始会话" }));
     await waitFor(() => expect(document.body.textContent).toContain("listening"));
     expect(commands.startSession).toHaveBeenCalledWith("direct");
-    expect((screen.getByRole("button", { name: "开始" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "开始会话" }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole("button", { name: "停止" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
@@ -174,7 +178,7 @@ describe("WorkspaceSession", () => {
 
     render(<WorkspaceSession />);
     fireEvent.click(await screen.findByLabelText("LiveKit"));
-    fireEvent.click(await screen.findByRole("button", { name: "开始" }));
+    fireEvent.click(await screen.findByRole("button", { name: "开始会话" }));
     await waitFor(() => expect(livekitRoom.connectLiveKitRoom).toHaveBeenCalledWith(join));
     expect(commands.startSession).toHaveBeenCalledWith("livekit");
     expect(document.body.textContent).toContain("LiveKit connected");
@@ -195,7 +199,7 @@ describe("WorkspaceSession", () => {
       },
     });
     render(<WorkspaceSession />);
-    fireEvent.click(await screen.findByRole("button", { name: "开始" }));
+    fireEvent.click(await screen.findByRole("button", { name: "开始会话" }));
     expect((await screen.findByRole("status")).textContent).toContain(
       "speech：SESSION_ROUTE_REQUIRED：open_services",
     );
@@ -211,7 +215,7 @@ describe("WorkspaceSession", () => {
         retryable: false,
       },
     });
-    fireEvent.click(screen.getByRole("button", { name: "开始" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始会话" }));
     expect((await screen.findByRole("status")).textContent).toContain(
       "session：SESSION_ALREADY_ACTIVE：会话已在进行",
     );
@@ -262,7 +266,7 @@ describe("WorkspaceSession", () => {
     });
 
     render(<WorkspaceSession />);
-    fireEvent.click(await screen.findByRole("button", { name: "开始" }));
+    fireEvent.click(await screen.findByRole("button", { name: "开始会话" }));
     await waitFor(() => expect(document.body.textContent).toContain("listening"));
     fireEvent.change(screen.getByLabelText("测试语句"), { target: { value: "请介绍岗位" } });
     fireEvent.click(screen.getByRole("button", { name: "提交语句" }));
@@ -287,7 +291,7 @@ describe("WorkspaceSession", () => {
     });
 
     render(<WorkspaceSession />);
-    fireEvent.click(await screen.findByRole("button", { name: "开始" }));
+    fireEvent.click(await screen.findByRole("button", { name: "开始会话" }));
     await waitFor(() => expect(document.body.textContent).toContain("listening"));
     fireEvent.change(screen.getByLabelText("测试语句"), { target: { value: "慢轮" } });
     fireEvent.click(screen.getByRole("button", { name: "提交语句" }));
@@ -298,7 +302,7 @@ describe("WorkspaceSession", () => {
     });
     expect((screen.getByRole("button", { name: "停止" }) as HTMLButtonElement).disabled).toBe(false);
     expect((screen.getByRole("button", { name: "接管" }) as HTMLButtonElement).disabled).toBe(false);
-    expect((screen.getByRole("button", { name: "开始" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "开始会话" }) as HTMLButtonElement).disabled).toBe(true);
     release();
     await waitFor(() => expect(commands.finalizeSessionUtterance).toHaveBeenCalledWith("慢轮"));
   });
@@ -317,7 +321,7 @@ describe("WorkspaceSession", () => {
     });
 
     render(<WorkspaceSession />);
-    fireEvent.click(await screen.findByRole("button", { name: "开始" }));
+    fireEvent.click(await screen.findByRole("button", { name: "开始会话" }));
     await waitFor(() => expect(document.body.textContent).toContain("listening"));
     fireEvent.change(screen.getByLabelText("测试语句"), { target: { value: "你好" } });
     fireEvent.click(screen.getByRole("button", { name: "提交语句" }));
@@ -339,7 +343,7 @@ describe("WorkspaceSession", () => {
     });
 
     render(<WorkspaceSession />);
-    fireEvent.click(await screen.findByRole("button", { name: "开始" }));
+    fireEvent.click(await screen.findByRole("button", { name: "开始会话" }));
     await waitFor(() => expect(document.body.textContent).toContain("listening"));
     fireEvent.change(screen.getByLabelText("测试语句"), { target: { value: "请介绍岗位" } });
     fireEvent.click(screen.getByRole("button", { name: "提交语句" }));
@@ -360,7 +364,7 @@ describe("WorkspaceSession", () => {
       ok: true,
       data: { kind: "started", session: summary({ id: "sess-2" }), livekit: null },
     });
-    fireEvent.click(screen.getByRole("button", { name: "开始" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始会话" }));
     await waitFor(() => {
       expect(commands.startSession).toHaveBeenCalledTimes(2);
       expect(document.body.textContent).not.toContain("转写");
@@ -436,7 +440,7 @@ describe("WorkspaceSession", () => {
     vi.mocked(commands.startSession).mockRejectedValue(new Error("ipc"));
     const fetchSpy = vi.spyOn(globalThis, "fetch");
     const { container } = render(<WorkspaceSession />);
-    fireEvent.click(await screen.findByRole("button", { name: "开始" }));
+    fireEvent.click(await screen.findByRole("button", { name: "开始会话" }));
     expect((await screen.findByRole("status")).textContent).toContain("IPC_UNAVAILABLE：");
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(container.innerHTML).not.toMatch(/\/api\//);

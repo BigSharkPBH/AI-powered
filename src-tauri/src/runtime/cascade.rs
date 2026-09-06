@@ -256,7 +256,7 @@ pub(crate) fn retrieve(
     user_text: &str,
 ) -> Vec<TurnCitation> {
     let query_vector = active_embedding(request.config).and_then(|embedding| {
-        let endpoint = provider_endpoint(request.config, &embedding.provider_id)?;
+        let endpoint = crate::services::embedding_endpoint(&request.config.models, embedding)?;
         if endpoint.base_url.is_empty() {
             return None;
         }

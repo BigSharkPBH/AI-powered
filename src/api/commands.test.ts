@@ -142,7 +142,7 @@ describe("Phase 3 service adapters", () => {
     await copyRoleProfile({ sourceId: "interviewer", id: "copy" });
     await activateRoleProfile("interviewer");
     await deleteRoleProfile("copy");
-    const embedding = { id: "primary", providerId: "openai", modelId: "embed", dimensions: 8, normalized: true };
+    const embedding = { id: "primary", providerId: "openai", baseUrl: null, apiKey: null, modelId: "embed", dimensions: 8, normalized: true };
     await saveEmbeddingConfig(embedding);
     await testEmbeddingConfig("primary");
     await activateEmbeddingConfig("primary");

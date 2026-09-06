@@ -34,7 +34,7 @@ export type TransportConfig = { livekit: LiveKitConfig, };
 
 export type EmbeddingDistance = "cosine";
 
-export type EmbeddingConfig = { id: string, providerId: string, modelId: string, dimensions: number, distance: EmbeddingDistance, normalized: boolean, active: boolean, ready: boolean, status: string | null, configVersion: number, };
+export type EmbeddingConfig = { id: string, providerId: string, baseUrl: string | null, credential: SecretSlot | null, modelId: string, dimensions: number, distance: EmbeddingDistance, normalized: boolean, active: boolean, ready: boolean, status: string | null, configVersion: number, };
 
 export type KnowledgeConfig = { embeddingConfigs: Array<EmbeddingConfig>, activeEmbeddingConfigId: string | null, };
 
@@ -62,7 +62,7 @@ export type RoleProfileSaveInput = { id: string, name: string, systemPrompt: str
 
 export type RoleProfileCopyInput = { sourceId: string, id: string, };
 
-export type EmbeddingConfigSaveInput = { id: string, providerId: string, modelId: string, dimensions: number, normalized: boolean, };
+export type EmbeddingConfigSaveInput = { id: string, providerId: string, baseUrl: string | null, apiKey: string | null, modelId: string, dimensions: number, normalized: boolean, };
 
 export type EmbeddingTestResult = { id: string, ready: boolean, dimensions: number, };
 

@@ -125,6 +125,25 @@
   min-height: 1.5rem;
 }
 
+.services-message[data-tone="success"],
+.service-test-result[data-tone="success"] {
+  color: #a6e3a1;
+}
+
+.services-message[data-tone="error"],
+.service-test-result[data-tone="error"] {
+  color: #f38ba8;
+}
+
+.services-message[data-tone="pending"],
+.service-test-result[data-tone="pending"] {
+  color: var(--shell-accent);
+}
+
+.service-test-result {
+  margin: 0.35rem 0 0;
+}
+
 .services-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -196,6 +215,20 @@
   display: flex;
   flex-wrap: wrap;
   gap: 0.45rem;
+}
+
+.session-idle-hint {
+  margin: 0.2rem 0 0.4rem;
+  color: var(--shell-accent);
+}
+
+.service-actions button.session-start {
+  min-width: 8.5rem;
+  padding: 0.7rem 1.15rem;
+  border-color: var(--shell-accent);
+  background: var(--shell-accent);
+  color: #11111b;
+  font-weight: 700;
 }
 
 .service-form button,

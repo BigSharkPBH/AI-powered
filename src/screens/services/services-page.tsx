@@ -6,23 +6,51 @@ import type { CommandResult, PublicConfig, VoiceRouteMode } from "../../generate
 
 const optional = (value: string) => value.trim() || null;
 const errorText = (error: { code: string; message: string; field?: string | null }) => `${error.field ? error.field + "：" : ""}${error.code}：${error.message}`;
+const providerTestMessage = (error: { code: string; message: string; field?: string | null }) => {
+  switch (error.code) {
+    case "PROVIDER_TIMEOUT": return "连接超时，请检查接口基址或网络";
+    case "PROVIDER_REQUEST_FAILED": return "连接失败：供应商接口没有正常响应";
+    case "PROVIDER_UNAUTHORIZED": return "连接失败：API Key 无效或没有权限";
+    case "PROVIDER_ENDPOINT_INVALID": return "连接失败：接口基址无效";
+    case "PROVIDER_RESPONSE_INVALID": return "已连通，但模型列表无法解析";
+    case "PROVIDER_RESPONSE_TOO_LARGE": return "连接失败：供应商返回内容过大";
+    case "PROVIDER_CLIENT_UNAVAILABLE": return "连接失败：本机无法发起请求";
+    case "PROVIDER_NOT_FOUND": return "连接失败：找不到该供应商";
+    default: return errorText(error);
+  }
+};
 const initialRoute = { id: "", name: "", mode: "cascaded" as VoiceRouteMode, asrProviderId: "", asrModelId: "", llmProviderId: "", llmModelId: "", ttsProviderId: "", ttsModelId: "", voiceId: "", e2eProviderId: "", e2eModelId: "" };
+type MessageTone = "info" | "pending" | "success" | "error";
+type ProviderTestState = { tone: Exclude<MessageTone, "info">; text: string };
 
 export function ServicesPage() {
   const [config, setConfig] = useState<PublicConfig | null>(null);
   const [message, setMessage] = useState("正在读取本地配置…");
+  const [messageTone, setMessageTone] = useState<MessageTone>("pending");
   const [busy, setBusy] = useState(false);
   const [models, setModels] = useState<Record<string, string[]>>({});
+  const [providerTests, setProviderTests] = useState<Record<string, ProviderTestState>>({});
   const [provider, setProvider] = useState({ id: "", name: "", baseUrl: "", apiKey: "" });
   const [route, setRoute] = useState(initialRoute);
 
-  const reload = useCallback(async () => {
+  const announce = (text: string, tone: MessageTone) => {
+    setMessage(text);
+    setMessageTone(tone);
+  };
+
+  const reload = useCallback(async (clearMessage = true) => {
     try {
       const result = await api.getConfigPublic();
-      if (result.ok) { setConfig(result.data); setMessage(""); }
-      else setMessage(errorText(result.error));
+      if (result.ok) {
+        setConfig(result.data);
+        if (clearMessage) { setMessage(""); setMessageTone("info"); }
+      } else {
+        setMessage(errorText(result.error));
+        setMessageTone("error");
+      }
     } catch {
       setMessage("IPC_UNAVAILABLE：无法读取本地配置");
+      setMessageTone("error");
     }
   }, []);
   useEffect(() => { void reload(); }, [reload]);
@@ -31,14 +59,42 @@ export function ServicesPage() {
     setBusy(true);
     try {
       const result = await action();
-      await reload();
-      if (!result.ok) { setMessage(errorText(result.error)); return false; }
-      setMessage(success);
+      await reload(false);
+      if (!result.ok) { announce(errorText(result.error), "error"); return false; }
+      announce(success, "success");
       return true;
     } catch {
-      await reload();
-      setMessage("IPC_UNAVAILABLE：本地操作失败");
+      await reload(false);
+      announce("IPC_UNAVAILABLE：本地操作失败", "error");
       return false;
+    } finally { setBusy(false); }
+  }
+
+  async function testProvider(id: string) {
+    setBusy(true);
+    announce("正在测试连接…", "pending");
+    setProviderTests((current) => ({ ...current, [id]: { tone: "pending", text: "正在测试连接…" } }));
+    try {
+      const result = await api.testModelProvider(id);
+      if (!result.ok) {
+        const text = providerTestMessage(result.error);
+        announce(text, "error");
+        setProviderTests((current) => ({ ...current, [id]: { tone: "error", text } }));
+        return;
+      }
+      if (!result.data.reachable) {
+        const text = "连接测试失败：供应商不可达";
+        announce(text, "error");
+        setProviderTests((current) => ({ ...current, [id]: { tone: "error", text } }));
+        return;
+      }
+      const text = `连接测试通过，发现 ${result.data.modelCount} 个模型`;
+      announce(text, "success");
+      setProviderTests((current) => ({ ...current, [id]: { tone: "success", text } }));
+    } catch {
+      const text = "IPC_UNAVAILABLE：连接测试失败";
+      announce(text, "error");
+      setProviderTests((current) => ({ ...current, [id]: { tone: "error", text } }));
     } finally { setBusy(false); }
   }
 
@@ -87,7 +143,7 @@ export function ServicesPage() {
   return <section className="services-page" aria-labelledby="page-heading-services">
     <p className="page-eyebrow">本机配置</p><h1 id="page-heading-services">服务</h1>
     <p className="services-intro">非敏感配置保存在本机；密钥仅保存到 Windows 凭据管理器。</p>
-    {message && <p className="services-message" role="status">{message}</p>}
+    {message && <p className="services-message" data-tone={messageTone} role="status" aria-live="polite">{message}</p>}
     <div className="services-grid">
       <section className="service-panel">
         <h2>模型供应商</h2>
@@ -104,9 +160,10 @@ export function ServicesPage() {
             <h3>{item.name || item.id}</h3><p>{item.baseUrl}</p>
             <p>密钥：{item.credential?.configured ? "已安全保存" : "未配置"}</p>
             {config?.models.activeProviderId === item.id && <strong>当前默认</strong>}
+            {providerTests[item.id] && <p className="service-test-result" data-tone={providerTests[item.id].tone} role="status">{providerTests[item.id].text}</p>}
             <div className="service-actions">
               <button aria-label={"编辑 " + (item.name || item.id)} disabled={busy} onClick={() => setProvider({ id: item.id, name: item.name ?? "", baseUrl: item.baseUrl, apiKey: "" })}>编辑</button>
-              <button disabled={busy} onClick={() => void run(() => api.testModelProvider(item.id), "连接测试通过")}>测试</button>
+              <button aria-label={"测试 " + (item.name || item.id)} disabled={busy} onClick={() => void testProvider(item.id)}>{providerTests[item.id]?.tone === "pending" ? "测试中…" : "测试"}</button>
               <button disabled={busy} onClick={() => void discover(item.id)}>发现模型</button>
               <button disabled={busy} onClick={() => void run(() => api.activateModelProvider(item.id), "默认供应商已更新")}>设为默认</button>
               <button disabled={busy} onClick={() => void run(() => api.deleteModelProvider(item.id), "供应商已删除")}>删除</button>
