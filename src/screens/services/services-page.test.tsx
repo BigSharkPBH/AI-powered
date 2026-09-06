@@ -106,7 +106,7 @@ describe("ServicesPage", () => {
     await screen.findByRole("heading", { name: "模型供应商" });
     fireEvent.change(screen.getByLabelText("供应商 ID"), { target: { value: "openai" } });
     fireEvent.change(screen.getByLabelText("显示名称"), { target: { value: "OpenAI" } });
-    fireEvent.change(within(screen.getByRole("region", { name: "模型供应商" })).getByLabelText("接口基址"), { target: { value: "https://example.test/v1" } });
+    fireEvent.change(screen.getAllByLabelText("接口基址")[0], { target: { value: "https://example.test/v1" } });
     const key = screen.getAllByLabelText(/API Key/)[0] as HTMLInputElement;
     fireEvent.change(key, { target: { value: "secret-marker" } });
     fireEvent.click(screen.getByRole("button", { name: "保存供应商" }));
