@@ -3,9 +3,9 @@ import { PageShell } from "../page-shell";
 
 export function WorkspacePage() {
   return (
-    <>
-      <PageShell id="workspace" hideStatus />
+    <div className="workspace-page">
+      <PageShell id="workspace" />
       <WorkspaceSession />
-    </>
+    </div>
   );
 }

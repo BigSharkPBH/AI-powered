@@ -54,8 +54,7 @@ describe("LiveKitEditor", () => {
     vi.mocked(commands.enableLiveKitSettings).mockResolvedValue({ ok: true, data: { ...ready, enabled: true } });
 
     render(<LiveKitEditor />);
-    expect(await screen.findByText(/默认关闭。媒体只会在以后明确使用 LiveKit/)).toBeTruthy();
-    expect(screen.getByText(/媒体只会在以后明确使用 LiveKit 时发送到该服务/)).toBeTruthy();
+    expect(await screen.findByText("默认关闭。启用后，媒体会发送到你配置的 LiveKit 服务。")).toBeTruthy();
     fireEvent.change(screen.getByLabelText("服务 URL"), { target: { value: "ws://127.0.0.1:7880" } });
     const key = screen.getByLabelText(/API Key/) as HTMLInputElement;
     const secret = screen.getByLabelText(/API Secret/) as HTMLInputElement;

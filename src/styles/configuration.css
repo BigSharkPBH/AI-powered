@@ -1,0 +1,155 @@
+.configuration-layout {
+  display: grid;
+  grid-template-columns: 156px minmax(0, 1fr);
+  align-items: start;
+  gap: 28px;
+}
+
+.configuration-layout > .settings-nav {
+  position: sticky;
+  top: 0;
+}
+
+.configuration-content,
+.configuration-columns > * {
+  min-width: 0;
+}
+
+.configuration-content > [hidden] {
+  display: none;
+}
+
+.configuration-content .service-panel {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.configuration-description {
+  margin: 6px 0 24px;
+  color: var(--text-muted);
+  line-height: 1.7;
+  max-width: 68ch;
+}
+
+.configuration-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 28px;
+}
+
+.configuration-columns .configuration-editor,
+.configuration-columns .configuration-list {
+  margin: 0;
+  align-content: start;
+}
+
+.configuration-editor > h3,
+.configuration-list > h3 {
+  margin: 0 0 6px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.configuration-count {
+  display: inline-block;
+  min-width: 20px;
+  margin-left: 4px;
+  padding: 0 5px;
+  border-radius: 5px;
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.configuration-list .service-card {
+  padding: 16px 0;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+}
+
+.configuration-list .service-card:first-of-type {
+  padding-top: 4px;
+}
+
+.configuration-list .service-card h3 {
+  margin: 0;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.configuration-list .service-card p {
+  margin: 7px 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.configuration-list .service-actions {
+  margin-top: 12px;
+}
+
+.configuration-editor > button,
+.configuration-migration-form > button {
+  justify-self: start;
+  margin-top: 4px;
+}
+
+.configuration-editor .configuration-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.configuration-copy {
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  align-items: end;
+}
+
+.configuration-copy label {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  gap: 5px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.configuration-migration-form {
+  max-width: 520px;
+}
+
+@media (max-width: 1100px) {
+  .configuration-layout {
+    grid-template-columns: 140px minmax(0, 1fr);
+    gap: 22px;
+  }
+
+  .configuration-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .configuration-columns > .configuration-list {
+    padding-top: 24px;
+    border-top: 1px solid var(--border);
+  }
+}
+
+@media (max-width: 760px) {
+  .configuration-layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 24px;
+  }
+
+  .configuration-layout > .settings-nav {
+    position: static;
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+}

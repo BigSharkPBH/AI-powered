@@ -45,7 +45,13 @@ npm run test:tauri-package
 - C# AudioBridge 仍用于会议进程音频采集
 - 无 Control API、无 Python Agent、无 Electron / Next.js
 
-页面：工作台、资料、记录、服务、设置与诊断。
+页面：工作台、资料、记录、服务、设置。
+
+## 界面与外观
+
+在「设置 → 外观」选择跟随系统、浅色或深色，偏好仅保存在本机。服务按模型供应商、语音线路、Embedding、LiveKit 分类；同一页切换分类会保留未提交的表单内容。工作台的朗读、纠正、重试与报告收纳在「会话工具」中。
+
+界面复用现有 React 和原生控件，使用 `lucide-react@1.41.0` 的具名图标（ISC，部分继承图标含 MIT 声明）；无需额外配置、远程字体或图标服务。
 
 ## OBS 与虚拟摄像头
 

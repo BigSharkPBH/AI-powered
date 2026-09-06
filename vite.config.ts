@@ -10,6 +10,10 @@ export default defineConfig({
     host: "127.0.0.1",
     port: 1420,
     strictPort: true,
+    watch: {
+      // Rust 编译时会锁定 PDB 文件，由 Tauri 负责监听后台目录。
+      ignored: ["**/src-tauri/**"],
+    },
   },
   build: {
     outDir: "dist-tauri-ui",

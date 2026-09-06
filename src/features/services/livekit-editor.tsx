@@ -75,68 +75,76 @@ export function LiveKitEditor() {
 
   return (
     <section className="service-panel livekit-editor" aria-labelledby="livekit-editor-heading">
-      <h2 id="livekit-editor-heading">LiveKit</h2>
-      <p>默认关闭。媒体只会在以后明确使用 LiveKit 时发送到该服务，不会经过作者服务器。</p>
+      <h2 className="section-heading" id="livekit-editor-heading">LiveKit</h2>
+      <p className="configuration-description">默认关闭。启用后，媒体会发送到你配置的 LiveKit 服务。</p>
       {message && (
         <p className="services-message" role="status">
           {message}
         </p>
       )}
-      <form className="service-form" onSubmit={submit}>
-        <label>
-          服务 URL
-          <input
-            type="text"
-            inputMode="url"
-            spellCheck={false}
-            placeholder="wss://livekit.example.com"
-            value={url}
-            onChange={(event) => setUrl(event.target.value)}
-          />
-        </label>
-        <label>
-          API Key
-          <input
-            type="password"
-            autoComplete="new-password"
-            value={apiKey}
-            onChange={(event) => setApiKey(event.target.value)}
-          />
-          <small>留空会保留已保存的密钥</small>
-        </label>
-        <label>
-          API Secret
-          <input
-            type="password"
-            autoComplete="new-password"
-            value={apiSecret}
-            onChange={(event) => setApiSecret(event.target.value)}
-          />
-          <small>留空会保留已保存的密钥</small>
-        </label>
-        <button disabled={busy} type="submit">
-          保存 LiveKit
-        </button>
-      </form>
-      <p>状态：{livekit?.enabled ? "已启用" : "默认关闭"}</p>
-      <p>
-        密钥：
-        {livekit?.apiKey?.configured && livekit.apiSecret?.configured ? "已安全保存" : "未配置"}
-      </p>
-      <p>{livekit?.ready ? "测试通过" : "尚未就绪"}</p>
-      <div className="service-actions">
-        <button disabled={busy} onClick={() => void run(() => api.testLiveKitSettings(), "LiveKit 测试通过")}>
-          测试
-        </button>
-        <button
-          disabled={busy || !livekit?.ready}
-          onClick={() => void run(() => api.enableLiveKitSettings(true), "LiveKit 已启用")}
-        >
-          启用
-        </button>
-        <button disabled={busy} onClick={() => void run(() => api.enableLiveKitSettings(false), "LiveKit 已关闭")}>
-          关闭
-        </button>
+      <div className="configuration-columns">
+        <form className="service-form configuration-editor" onSubmit={submit}>
+          <h3>连接配置</h3>
+          <label>
+            服务 URL
+            <input
+              type="text"
+              inputMode="url"
+              spellCheck={false}
+              placeholder="wss://livekit.example.com"
+              value={url}
+              onChange={(event) => setUrl(event.target.value)}
+            />
+          </label>
+          <label>
+            API Key
+            <input
+              type="password"
+              autoComplete="new-password"
+              value={apiKey}
+              onChange={(event) => setApiKey(event.target.value)}
+            />
+            <small>留空会保留已保存的密钥</small>
+          </label>
+          <label>
+            API Secret
+            <input
+              type="password"
+              autoComplete="new-password"
+              value={apiSecret}
+              onChange={(event) => setApiSecret(event.target.value)}
+            />
+            <small>留空会保留已保存的密钥</small>
+          </label>
+          <button className="button-primary" disabled={busy} type="submit">
+            保存 LiveKit
+          </button>
+        </form>
+        <div className="configuration-list service-list">
+        <h3>服务状态</h3>
+        <article className="service-card">
+        <p>状态：{livekit?.enabled ? "已启用" : "默认关闭"}</p>
+        <p>
+          密钥：
+          {livekit?.apiKey?.configured && livekit.apiSecret?.configured ? "已安全保存" : "未配置"}
+        </p>
+        <p>{livekit?.ready ? "测试通过" : "尚未就绪"}</p>
+        <div className="service-actions">
+          <button disabled={busy} onClick={() => void run(() => api.testLiveKitSettings(), "LiveKit 测试通过")}>
+            测试
+          </button>
+          <button
+            disabled={busy || !livekit?.ready}
+            onClick={() => void run(() => api.enableLiveKitSettings(true), "LiveKit 已启用")}
+          >
+            启用
+          </button>
+          <button disabled={busy} onClick={() => void run(() => api.enableLiveKitSettings(false), "LiveKit 已关闭")}>
+            关闭
+          </button>
+        </div>
+        </article>
+        </div>
       </div>
     </section>
   );

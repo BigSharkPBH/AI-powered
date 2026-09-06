@@ -49,7 +49,7 @@ describe("routes", () => {
       expect(routeLabel("materials")).toBe("资料");
       expect(routeLabel("records")).toBe("记录");
       expect(routeLabel("services")).toBe("服务");
-      expect(routeLabel("settings")).toBe("设置与诊断");
+      expect(routeLabel("settings")).toBe("设置");
     });
   });
 

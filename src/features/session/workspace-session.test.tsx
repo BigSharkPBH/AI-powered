@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as commands from "../../api/commands";
@@ -136,11 +137,11 @@ describe("WorkspaceSession", () => {
     const start = await screen.findByRole("button", { name: "开始会话" });
     expect(start).toBeTruthy();
     expect((start as HTMLButtonElement).disabled).toBe(false);
-    expect(document.body.textContent).toContain("请点下面的「开始会话」");
+    expect(document.body.textContent).toContain("点击「开始会话」");
     expect((screen.getByRole("button", { name: "停止" }) as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByRole("button", { name: "提交语句" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByRole("heading", { name: "当前会话" })).toBeTruthy();
-    expect(document.body.textContent).toContain("idle");
+    expect(document.body.textContent).toContain("未开始");
   });
 
   it("starts a session and shows the listening phase", async () => {
@@ -150,10 +151,44 @@ describe("WorkspaceSession", () => {
 
     render(<WorkspaceSession />);
     fireEvent.click(await screen.findByRole("button", { name: "开始会话" }));
-    await waitFor(() => expect(document.body.textContent).toContain("listening"));
+    await waitFor(() => expect(document.body.textContent).toContain("聆听中"));
     expect(commands.startSession).toHaveBeenCalledWith("direct");
     expect((screen.getByRole("button", { name: "开始会话" }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole("button", { name: "停止" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("keeps session tools collapsed and preserves input when reopened", async () => {
+    render(<WorkspaceSession />);
+    await screen.findByText("未开始");
+    const toggle = screen.getByText("会话工具", { selector: "summary" });
+    const tools = toggle.closest("details") as HTMLDetailsElement;
+    expect(tools.open).toBe(false);
+    expect(screen.getByRole("button", { name: "朗读" })).not.toBeVisible();
+    fireEvent.click(toggle);
+    expect(tools.open).toBe(true);
+    fireEvent.change(screen.getByLabelText("朗读文本"), { target: { value: "保留朗读草稿" } });
+    fireEvent.change(screen.getByLabelText("纠正内容"), { target: { value: "保留纠正草稿" } });
+    fireEvent.click(toggle);
+    expect(screen.getByRole("button", { name: "纠正" })).not.toBeVisible();
+    fireEvent.click(toggle);
+    expect((screen.getByLabelText("朗读文本") as HTMLInputElement).value).toBe("保留朗读草稿");
+    expect((screen.getByLabelText("纠正内容") as HTMLInputElement).value).toBe("保留纠正草稿");
+    expect(commands.sessionAgentCommand).not.toHaveBeenCalled();
+  });
+
+  it("exposes a named current-turn region and submits from the input form", async () => {
+    vi.mocked(commands.getRuntimeStatus).mockResolvedValue({
+      ok: true,
+      data: status({ phase: "listening", seq: 2 }),
+    });
+    render(<WorkspaceSession />);
+    await screen.findByText("聆听中");
+    const conversation = screen.getByRole("region", { name: "当前轮对话" });
+    expect(conversation.tabIndex).toBe(0);
+    const input = screen.getByRole("textbox", { name: "语句输入" });
+    fireEvent.change(input, { target: { value: "  键盘提交  " } });
+    fireEvent.submit(input.closest("form")!);
+    await waitFor(() => expect(commands.finalizeSessionUtterance).toHaveBeenCalledWith("键盘提交"));
   });
 
   it("connects LiveKit with the join token and disconnects on stop", async () => {
@@ -181,7 +216,7 @@ describe("WorkspaceSession", () => {
     fireEvent.click(await screen.findByRole("button", { name: "开始会话" }));
     await waitFor(() => expect(livekitRoom.connectLiveKitRoom).toHaveBeenCalledWith(join));
     expect(commands.startSession).toHaveBeenCalledWith("livekit");
-    expect(document.body.textContent).toContain("LiveKit connected");
+    expect(document.body.textContent).toContain("LiveKit 已连接");
 
     fireEvent.click(screen.getByRole("button", { name: "停止" }));
     await waitFor(() => expect(livekitRoom.disconnectLiveKitRoom).toHaveBeenCalled());
@@ -227,10 +262,10 @@ describe("WorkspaceSession", () => {
       .mockResolvedValue({ ok: true, data: status({ phase: "completed", seq: 3 }) });
 
     render(<WorkspaceSession />);
-    await screen.findByText(/listening/);
+    await screen.findByText("聆听中");
     fireEvent.click(screen.getByRole("button", { name: "停止" }));
     await waitFor(() => expect(commands.stopSession).toHaveBeenCalled());
-    expect(document.body.textContent).toContain("completed");
+    expect(document.body.textContent).toContain("已结束");
   });
 
   it("takeover switches 接管 / 恢复 AI / 静音 without prompting", async () => {
@@ -242,7 +277,7 @@ describe("WorkspaceSession", () => {
     const confirmSpy = vi.spyOn(window, "confirm");
 
     render(<WorkspaceSession />);
-    await screen.findByText(/listening/);
+    await screen.findByText("聆听中");
     fireEvent.click(screen.getByRole("button", { name: "接管" }));
     await waitFor(() => expect(commands.setSessionMode).toHaveBeenCalledWith("operator_speaking"));
     fireEvent.click(screen.getByRole("button", { name: "恢复 AI" }));
@@ -267,9 +302,9 @@ describe("WorkspaceSession", () => {
 
     render(<WorkspaceSession />);
     fireEvent.click(await screen.findByRole("button", { name: "开始会话" }));
-    await waitFor(() => expect(document.body.textContent).toContain("listening"));
-    fireEvent.change(screen.getByLabelText("测试语句"), { target: { value: "请介绍岗位" } });
-    fireEvent.click(screen.getByRole("button", { name: "提交语句" }));
+    await waitFor(() => expect(document.body.textContent).toContain("聆听中"));
+    fireEvent.change(screen.getByLabelText("语句输入"), { target: { value: "请介绍岗位" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
     await waitFor(() => expect(commands.finalizeSessionUtterance).toHaveBeenCalledWith("请介绍岗位"));
     expect(document.body.textContent).toContain("请介绍岗位");
     expect(document.body.textContent).toContain("这是一个后端岗位");
@@ -292,11 +327,11 @@ describe("WorkspaceSession", () => {
 
     render(<WorkspaceSession />);
     fireEvent.click(await screen.findByRole("button", { name: "开始会话" }));
-    await waitFor(() => expect(document.body.textContent).toContain("listening"));
-    fireEvent.change(screen.getByLabelText("测试语句"), { target: { value: "慢轮" } });
-    fireEvent.click(screen.getByRole("button", { name: "提交语句" }));
+    await waitFor(() => expect(document.body.textContent).toContain("聆听中"));
+    fireEvent.change(screen.getByLabelText("语句输入"), { target: { value: "慢轮" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
     await waitFor(() => {
-      expect((screen.getByRole("button", { name: "提交语句" }) as HTMLButtonElement).disabled).toBe(
+      expect((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled).toBe(
         true,
       );
     });
@@ -322,9 +357,9 @@ describe("WorkspaceSession", () => {
 
     render(<WorkspaceSession />);
     fireEvent.click(await screen.findByRole("button", { name: "开始会话" }));
-    await waitFor(() => expect(document.body.textContent).toContain("listening"));
-    fireEvent.change(screen.getByLabelText("测试语句"), { target: { value: "你好" } });
-    fireEvent.click(screen.getByRole("button", { name: "提交语句" }));
+    await waitFor(() => expect(document.body.textContent).toContain("聆听中"));
+    fireEvent.change(screen.getByLabelText("语句输入"), { target: { value: "你好" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
     expect((await screen.findByText("本轮未使用资料")).textContent).toBe("本轮未使用资料");
     expect(commands.finalizeSessionUtterance).toHaveBeenCalledWith("你好");
   });
@@ -344,9 +379,9 @@ describe("WorkspaceSession", () => {
 
     render(<WorkspaceSession />);
     fireEvent.click(await screen.findByRole("button", { name: "开始会话" }));
-    await waitFor(() => expect(document.body.textContent).toContain("listening"));
-    fireEvent.change(screen.getByLabelText("测试语句"), { target: { value: "请介绍岗位" } });
-    fireEvent.click(screen.getByRole("button", { name: "提交语句" }));
+    await waitFor(() => expect(document.body.textContent).toContain("聆听中"));
+    fireEvent.change(screen.getByLabelText("语句输入"), { target: { value: "请介绍岗位" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
     await waitFor(() => expect(document.body.textContent).toContain("这是一个后端岗位"));
 
     vi.mocked(commands.getRuntimeStatus).mockResolvedValue({
@@ -354,7 +389,7 @@ describe("WorkspaceSession", () => {
       data: status({ phase: "completed", seq: 5 }),
     });
     fireEvent.click(screen.getByRole("button", { name: "停止" }));
-    await waitFor(() => expect(document.body.textContent).toContain("completed"));
+    await waitFor(() => expect(document.body.textContent).toContain("已结束"));
 
     vi.mocked(commands.getSession).mockResolvedValue({
       ok: true,
@@ -369,7 +404,7 @@ describe("WorkspaceSession", () => {
       expect(commands.startSession).toHaveBeenCalledTimes(2);
       expect(document.body.textContent).not.toContain("转写");
       expect(document.body.textContent).not.toContain("这是一个后端岗位");
-      expect((screen.getByLabelText("测试语句") as HTMLInputElement).value).toBe("");
+      expect((screen.getByLabelText("语句输入") as HTMLInputElement).value).toBe("");
     });
   });
 
@@ -401,7 +436,7 @@ describe("WorkspaceSession", () => {
         revision: 0,
       });
     });
-    expect(document.body.textContent).toContain("thinking");
+    expect(document.body.textContent).toContain("思考中");
     act(() => {
       listeners.status?.({
         phase: "idle",
@@ -412,8 +447,8 @@ describe("WorkspaceSession", () => {
         revision: 0,
       });
     });
-    expect(document.body.textContent).toContain("thinking");
-    expect(document.body.textContent).not.toMatch(/idle/);
+    expect(document.body.textContent).toContain("思考中");
+    expect(document.body.textContent).not.toMatch(/未开始/);
 
     act(() => {
       listeners.transcript?.({ seq: 4, text: "新转写" });
@@ -451,6 +486,7 @@ describe("WorkspaceSession", () => {
 
   it("keeps command buttons disabled while the session is inactive", async () => {
     render(<WorkspaceSession />);
+    fireEvent.click(screen.getByText("会话工具", { selector: "summary" }));
     expect((await screen.findByRole("button", { name: "朗读" }) as HTMLButtonElement).disabled).toBe(
       true,
     );
@@ -468,7 +504,8 @@ describe("WorkspaceSession", () => {
     vi.spyOn(globalThis.crypto, "randomUUID").mockReturnValue("00000000-0000-0000-0000-000000000001");
 
     render(<WorkspaceSession />);
-    await screen.findByText(/listening/);
+    fireEvent.click(screen.getByText("会话工具", { selector: "summary" }));
+    await screen.findByText("聆听中");
     fireEvent.change(screen.getByLabelText("朗读文本"), { target: { value: "请开始自我介绍" } });
     fireEvent.click(screen.getByRole("button", { name: "朗读" }));
     await waitFor(() =>
@@ -481,8 +518,8 @@ describe("WorkspaceSession", () => {
         expectedRevision: 3,
       }),
     );
-    expect(screen.getByLabelText("测试语句")).toBeTruthy();
-    expect((screen.getByLabelText("测试语句") as HTMLInputElement).value).toBe("");
+    expect(screen.getByLabelText("语句输入")).toBeTruthy();
+    expect((screen.getByLabelText("语句输入") as HTMLInputElement).value).toBe("");
     vi.mocked(globalThis.crypto.randomUUID).mockRestore();
   });
 
@@ -511,7 +548,8 @@ describe("WorkspaceSession", () => {
       .mockReturnValueOnce("00000000-0000-0000-0000-000000000003");
 
     render(<WorkspaceSession />);
-    await screen.findByText(/listening/);
+    fireEvent.click(screen.getByText("会话工具", { selector: "summary" }));
+    await screen.findByText("聆听中");
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
     await waitFor(() =>
       expect(commands.sessionAgentCommand).toHaveBeenCalledWith({
@@ -564,7 +602,8 @@ describe("WorkspaceSession", () => {
     });
 
     render(<WorkspaceSession />);
-    await screen.findByText(/listening/);
+    fireEvent.click(screen.getByText("会话工具", { selector: "summary" }));
+    await screen.findByText("聆听中");
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
     expect((await screen.findByRole("status")).textContent).toContain("SESSION_CHANGED");
     expect(screen.getByRole("status").textContent).not.toContain("pcm");
@@ -585,7 +624,8 @@ describe("WorkspaceSession", () => {
     });
 
     render(<WorkspaceSession />);
-    await screen.findByText(/listening/);
+    fireEvent.click(screen.getByText("会话工具", { selector: "summary" }));
+    await screen.findByText("聆听中");
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
     await waitFor(() => {
       expect((screen.getByRole("button", { name: "朗读" }) as HTMLButtonElement).disabled).toBe(true);

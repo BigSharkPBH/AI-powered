@@ -90,139 +90,143 @@ export function EmbeddingEditor() {
 
   return (
     <section className="service-panel embedding-editor" aria-labelledby="embedding-editor-heading">
-      <h2 id="embedding-editor-heading">Embedding</h2>
-      <p>可以选用已保存的供应商，或自行填写 OpenAI 兼容接入地址。测试、切片和查询文本会发到该接口，不会经过作者服务器。</p>
+      <h2 className="section-heading" id="embedding-editor-heading">Embedding</h2>
+      <p className="configuration-description">可以选用已保存的供应商，或自行填写 OpenAI 兼容接入地址。测试、切片和查询文本会发到该接口，不会经过作者服务器。</p>
       {message && (
         <p className="services-message" role="status">
           {message}
         </p>
       )}
-      <form className="service-form" onSubmit={submit}>
-        <label>
-          配置 ID
-          <input
-            required
-            pattern="[a-z0-9_-]+"
-            value={embedding.id}
-            onChange={(event) => setEmbedding({ ...embedding, id: event.target.value })}
-          />
-        </label>
-        <label>
-          供应商
-          <select
-            value={embedding.providerId}
-            onChange={(event) => setEmbedding({ ...embedding, providerId: event.target.value, apiKey: "" })}
-          >
-            <option value="">不使用供应商，自行填写地址</option>
-            {providers.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.name || item.id}
-              </option>
-            ))}
-          </select>
-        </label>
-        {!usingProvider && (
-          <>
-            <label>
-              接口基址
-              <input
-                required
-                type="url"
-                placeholder="http://127.0.0.1:8080/v1"
-                value={embedding.baseUrl}
-                onChange={(event) => setEmbedding({ ...embedding, baseUrl: event.target.value })}
-              />
-            </label>
-            <label>
-              API Key
-              <input
-                type="password"
-                autoComplete="new-password"
-                value={embedding.apiKey}
-                onChange={(event) => setEmbedding({ ...embedding, apiKey: event.target.value })}
-              />
-              <small>留空会保留已保存的密钥；无鉴权可留空</small>
-            </label>
-          </>
-        )}
-        <label>
-          模型
-          <input
-            required
-            value={embedding.modelId}
-            onChange={(event) => setEmbedding({ ...embedding, modelId: event.target.value })}
-          />
-        </label>
-        <label>
-          维度
-          <input
-            required
-            type="number"
-            min={1}
-            max={65536}
-            value={embedding.dimensions}
-            onChange={(event) => setEmbedding({ ...embedding, dimensions: event.target.value })}
-          />
-        </label>
-        <label>
-          距离
-          <input readOnly value="cosine" />
-        </label>
-        <label>
-          <input
-            type="checkbox"
-            checked={embedding.normalized}
-            onChange={(event) => setEmbedding({ ...embedding, normalized: event.target.checked })}
-          />
-          归一化向量
-        </label>
-        <button disabled={busy} type="submit">
-          保存 Embedding
-        </button>
-      </form>
-      <div className="service-list">
-        {items.length === 0 && <p>还没有 Embedding 配置。</p>}
-        {items.map((item) => (
-          <article className="service-card" key={item.id}>
-            <h3>{item.id}</h3>
-            <p>
-              {item.providerId || item.baseUrl || "自定义"} · {item.modelId} · {item.dimensions} 维 · cosine
-            </p>
-            <p>{item.ready ? "测试通过" : "尚未就绪"}</p>
-            {item.active && <strong>当前启用</strong>}
-            <div className="service-actions">
-              <button
-                aria-label={"编辑 " + item.id}
-                disabled={busy}
-                onClick={() =>
-                  setEmbedding({
-                    id: item.id,
-                    providerId: item.providerId,
-                    baseUrl: item.baseUrl ?? "",
-                    apiKey: "",
-                    modelId: item.modelId,
-                    dimensions: String(item.dimensions),
-                    normalized: item.normalized,
-                  })
-                }
-              >
-                编辑
-              </button>
-              <button disabled={busy} onClick={() => void run(() => api.testEmbeddingConfig(item.id), "Embedding 测试通过")}>
-                测试
-              </button>
-              <button
-                disabled={busy || !item.ready}
-                onClick={() => void run(() => api.activateEmbeddingConfig(item.id), "Embedding 已启用")}
-              >
-                启用
-              </button>
-              <button disabled={busy} onClick={() => void run(() => api.deleteEmbeddingConfig(item.id), "Embedding 已删除")}>
-                删除
-              </button>
-            </div>
-          </article>
-        ))}
+      <div className="configuration-columns">
+        <form className="service-form configuration-editor" onSubmit={submit}>
+          <h3>{items.some((item) => item.id === embedding.id) ? "编辑配置" : "添加配置"}</h3>
+          <label>
+            配置 ID
+            <input
+              required
+              pattern="[a-z0-9_-]+"
+              value={embedding.id}
+              onChange={(event) => setEmbedding({ ...embedding, id: event.target.value })}
+            />
+          </label>
+          <label>
+            供应商
+            <select
+              value={embedding.providerId}
+              onChange={(event) => setEmbedding({ ...embedding, providerId: event.target.value, apiKey: "" })}
+            >
+              <option value="">不使用供应商，自行填写地址</option>
+              {providers.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.name || item.id}
+                </option>
+              ))}
+            </select>
+          </label>
+          {!usingProvider && (
+            <>
+              <label>
+                接口基址
+                <input
+                  required
+                  type="url"
+                  placeholder="http://127.0.0.1:8080/v1"
+                  value={embedding.baseUrl}
+                  onChange={(event) => setEmbedding({ ...embedding, baseUrl: event.target.value })}
+                />
+              </label>
+              <label>
+                API Key
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  value={embedding.apiKey}
+                  onChange={(event) => setEmbedding({ ...embedding, apiKey: event.target.value })}
+                />
+                <small>留空会保留已保存的密钥；无鉴权可留空</small>
+              </label>
+            </>
+          )}
+          <label>
+            模型
+            <input
+              required
+              value={embedding.modelId}
+              onChange={(event) => setEmbedding({ ...embedding, modelId: event.target.value })}
+            />
+          </label>
+          <label>
+            维度
+            <input
+              required
+              type="number"
+              min={1}
+              max={65536}
+              value={embedding.dimensions}
+              onChange={(event) => setEmbedding({ ...embedding, dimensions: event.target.value })}
+            />
+          </label>
+          <label>
+            距离
+            <input readOnly value="cosine" />
+          </label>
+          <label className="configuration-checkbox">
+            <input
+              type="checkbox"
+              checked={embedding.normalized}
+              onChange={(event) => setEmbedding({ ...embedding, normalized: event.target.checked })}
+            />
+            归一化向量
+          </label>
+          <button className="button-primary" disabled={busy} type="submit">
+            保存 Embedding
+          </button>
+        </form>
+        <div className="service-list configuration-list">
+          <h3>已配置模型 <span className="configuration-count">{items.length}</span></h3>
+          {items.length === 0 && <p className="empty-state">还没有 Embedding 配置。</p>}
+          {items.map((item) => (
+            <article className="service-card" key={item.id}>
+              <h3>{item.id}</h3>
+              <p>
+                {item.providerId || item.baseUrl || "自定义"} · {item.modelId} · {item.dimensions} 维 · cosine
+              </p>
+              <p>{item.ready ? "测试通过" : "尚未就绪"}</p>
+              {item.active && <span className="status-badge">当前启用</span>}
+              <div className="service-actions">
+                <button
+                  aria-label={"编辑 " + item.id}
+                  disabled={busy}
+                  onClick={() =>
+                    setEmbedding({
+                      id: item.id,
+                      providerId: item.providerId,
+                      baseUrl: item.baseUrl ?? "",
+                      apiKey: "",
+                      modelId: item.modelId,
+                      dimensions: String(item.dimensions),
+                      normalized: item.normalized,
+                    })
+                  }
+                >
+                  编辑
+                </button>
+                <button disabled={busy} onClick={() => void run(() => api.testEmbeddingConfig(item.id), "Embedding 测试通过")}>
+                  测试
+                </button>
+                <button
+                  disabled={busy || !item.ready}
+                  onClick={() => void run(() => api.activateEmbeddingConfig(item.id), "Embedding 已启用")}
+                >
+                  启用
+                </button>
+                <button className="button-danger" disabled={busy} onClick={() => void run(() => api.deleteEmbeddingConfig(item.id), "Embedding 已删除")}>
+                  删除
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
       </div>
     </section>
   );

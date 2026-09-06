@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as commands from "../../api/commands";
@@ -50,6 +51,7 @@ describe("MaterialsLibrary", () => {
   it("shows loading then empty state", async () => {
     render(<MaterialsLibrary />);
     expect(screen.getByRole("status").textContent).toContain("正在读取本地资料");
+    expect(screen.queryByText("还没有资料。")).toBeNull();
     expect(await screen.findByText("还没有资料。")).toBeTruthy();
   });
 
@@ -69,7 +71,7 @@ describe("MaterialsLibrary", () => {
     });
     const { container } = render(<MaterialsLibrary />);
     expect(await screen.findByText("resume.md")).toBeTruthy();
-    expect(screen.getByText("text_ready")).toBeTruthy();
+    expect(screen.getByText("文本就绪")).toBeTruthy();
     expect(container.textContent).toContain("3");
     expect(container.innerHTML).not.toContain("FULL_EXTRACTED_TEXT");
     expect(container.innerHTML).not.toMatch(/password|apiKey|apiSecret|credential/i);
@@ -91,7 +93,7 @@ describe("MaterialsLibrary", () => {
     expect(commands.indexMaterials).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "重建索引" }));
     await waitFor(() => expect(commands.indexMaterials).toHaveBeenCalledTimes(1));
-    expect(await screen.findByText("vector_ready")).toBeTruthy();
+    expect(await screen.findByText("已建索引")).toBeTruthy();
     expect(commands.importMaterial).not.toHaveBeenCalled();
   });
 
@@ -104,6 +106,7 @@ describe("MaterialsLibrary", () => {
 
     render(<MaterialsLibrary />);
     await screen.findByText("还没有资料。");
+    fireEvent.click(screen.getByText("导入资料"));
     expect(screen.getByLabelText("文件路径").getAttribute("type")).toBe("text");
     expect(screen.queryByRole("button", { name: "选择文件" })).toBeNull();
     fireEvent.change(screen.getByLabelText("文件路径"), { target: { value: "E:/docs/resume.md" } });
@@ -116,6 +119,7 @@ describe("MaterialsLibrary", () => {
     const selectPath = vi.fn().mockResolvedValue("E:/picked/note.txt");
     render(<MaterialsLibrary selectPath={selectPath} />);
     await screen.findByText("还没有资料。");
+    fireEvent.click(screen.getByText("导入资料"));
     fireEvent.click(screen.getByRole("button", { name: "选择文件" }));
     await waitFor(() => expect(selectPath).toHaveBeenCalled());
     expect((screen.getByLabelText("文件路径") as HTMLInputElement).value).toBe("E:/picked/note.txt");
@@ -167,6 +171,7 @@ describe("MaterialsLibrary", () => {
     });
     render(<MaterialsLibrary />);
     await screen.findByText("还没有资料。");
+    fireEvent.click(screen.getByText("导入资料"));
     fireEvent.change(screen.getByLabelText("文件路径"), { target: { value: "relative.md" } });
     fireEvent.click(screen.getByRole("button", { name: "导入" }));
     expect((await screen.findByRole("status")).textContent).toContain("path：MATERIAL_PATH_INVALID：路径无效");
@@ -185,5 +190,44 @@ describe("MaterialsLibrary", () => {
     expect(container.innerHTML).not.toMatch(/\/api\//);
     expect(container.innerHTML).not.toContain("@tauri-apps/api");
     fetchSpy.mockRestore();
+  });
+
+  it("keeps import collapsed by default and preserves its path when reopened", async () => {
+    render(<MaterialsLibrary />);
+    await screen.findByText("还没有资料。");
+    expect(screen.getByRole("search", { name: "搜索资料" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "导入" })).not.toBeVisible();
+    const summary = screen.getByText("导入资料");
+    expect((summary.closest("details") as HTMLDetailsElement).open).toBe(false);
+    fireEvent.click(summary);
+    fireEvent.change(screen.getByRole("textbox", { name: "文件路径" }), { target: { value: "C:/资料/草稿.md" } });
+    fireEvent.click(summary);
+    expect(screen.getByRole("textbox", { name: "文件路径" })).not.toBeVisible();
+    fireEvent.click(summary);
+    expect((screen.getByRole("textbox", { name: "文件路径" }) as HTMLInputElement).value).toBe("C:/资料/草稿.md");
+  });
+
+  it("shows a distinct empty search result after a successful search", async () => {
+    vi.mocked(commands.searchMaterials).mockResolvedValue({ ok: true, data: [] });
+    render(<MaterialsLibrary />);
+    await screen.findByText("还没有资料。");
+    expect(screen.queryByRole("region", { name: "检索结果" })).toBeNull();
+    fireEvent.change(screen.getByRole("textbox", { name: "检索词" }), { target: { value: "无匹配内容" } });
+    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+    expect(await screen.findByText("未找到匹配内容，试试其他关键词。")).toBeTruthy();
+    expect(screen.getByRole("region", { name: "检索结果" })).toBeTruthy();
+  });
+
+  it("disables destructive and index actions while a search is running", async () => {
+    vi.mocked(commands.listMaterials).mockResolvedValue({ ok: true, data: [material()] });
+    let finishSearch!: (result: { ok: true; data: MaterialSearchHit[] }) => void;
+    vi.mocked(commands.searchMaterials).mockImplementation(() => new Promise((resolve) => { finishSearch = resolve; }));
+    render(<MaterialsLibrary />);
+    await screen.findByText("resume.md");
+    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+    expect((screen.getByRole("button", { name: "删除" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "重建索引" }) as HTMLButtonElement).disabled).toBe(true);
+    finishSearch({ ok: true, data: [] });
+    await waitFor(() => expect((screen.getByRole("button", { name: "重建索引" }) as HTMLButtonElement).disabled).toBe(false));
   });
 });

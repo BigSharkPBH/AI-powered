@@ -1,6 +1,8 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { ArrowUp, Bot, ChevronDown, FileText, Hand, MessageSquare, MicOff, Play, RotateCcw, Square, Volume2, Wrench } from "lucide-react";
 
 import * as api from "../../api/commands";
+import "../../styles/workspace.css";
 import { connectLiveKitRoom, disconnectLiveKitRoom } from "./livekit-room";
 import type {
   AgentCommandInput,
@@ -22,6 +24,26 @@ const ACTIVE_PHASES = new Set([
   "recovering",
   "blocked",
 ]);
+
+const PHASE_LABELS: Record<string, string> = {
+  idle: "未开始",
+  preparing: "准备中",
+  listening: "聆听中",
+  thinking: "思考中",
+  speaking: "回复中",
+  stopping: "停止中",
+  recovering: "恢复中",
+  blocked: "需要处理",
+  completed: "已结束",
+  failed: "会话异常",
+};
+
+const MODE_LABELS: Record<string, string> = {
+  ai_active: "AI 应答",
+  operator_speaking: "人工接管",
+  paused: "已暂停",
+  muted: "已静音",
+};
 
 export type SessionListen = <T>(
   event: string,
@@ -375,97 +397,138 @@ export function WorkspaceSession({
   const active = ACTIVE_PHASES.has(phase);
 
   return (
-    <section className="service-panel workspace-session" aria-labelledby="workspace-session-heading">
-      <h2 id="workspace-session-heading">当前会话</h2>
+    <section className="workspace-session" aria-labelledby="workspace-session-heading">
+      <header className="session-toolbar">
+        <div className="session-toolbar-meta">
+          <h2 id="workspace-session-heading">当前会话</h2>
+          <span className="status-badge" data-active={active}>
+            {PHASE_LABELS[phase] ?? phase}
+          </span>
+          <span className="session-mode">{MODE_LABELS[mode] ?? mode}</span>
+          {livekitState !== "idle" && (
+            <span className="session-mode">LiveKit {livekitState === "connected" ? "已连接" : "连接失败"}</span>
+          )}
+        </div>
+        <div className="session-toolbar-controls">
+          <fieldset className="session-transport">
+            <legend>传输方式</legend>
+            <label>
+              <input
+                type="radio"
+                name="transport"
+                value="direct"
+                checked={transport === "direct"}
+                disabled={busy || active}
+                onChange={() => setTransport("direct")}
+              />
+              <span>本机直连</span>
+            </label>
+            <label>
+              <input
+                type="radio"
+                name="transport"
+                value="livekit"
+                checked={transport === "livekit"}
+                disabled={busy || active}
+                onChange={() => setTransport("livekit")}
+              />
+              <span>LiveKit</span>
+            </label>
+          </fieldset>
+          <div className="service-actions session-controls">
+            <button className="button-primary" disabled={busy || active} type="button" onClick={() => void start()}>
+              <Play size={14} aria-hidden="true" />开始会话
+            </button>
+            <button disabled={!active} type="button" onClick={() => void stop()}>
+              <Square size={14} aria-hidden="true" />停止
+            </button>
+            <button disabled={!active} type="button" onClick={() => void setModeName("operator_speaking")}>
+              <Hand size={14} aria-hidden="true" />接管
+            </button>
+            <button disabled={busy || !active} type="button" onClick={() => void setModeName("ai_active")}>
+              <Bot size={14} aria-hidden="true" />恢复 AI
+            </button>
+            <button disabled={busy || !active} type="button" onClick={() => void setModeName("muted")}>
+              <MicOff size={14} aria-hidden="true" />静音
+            </button>
+          </div>
+        </div>
+      </header>
       {message && (
-        <p className="services-message" role="status">
+        <p className="services-message session-message" role="status">
           {message}
         </p>
       )}
-      <p>阶段 {phase}</p>
-      <p>模式 {mode}</p>
-      {phase === "idle" && <p className="session-idle-hint">还没有会话。请点下面的「开始会话」。</p>}
-      <fieldset>
-        <legend>传输</legend>
-        <label>
-          <input
-            type="radio"
-            name="transport"
-            value="direct"
-            checked={transport === "direct"}
-            disabled={busy || active}
-            onChange={() => setTransport("direct")}
-          />
-          本机直连
-        </label>
-        <label>
-          <input
-            type="radio"
-            name="transport"
-            value="livekit"
-            checked={transport === "livekit"}
-            disabled={busy || active}
-            onChange={() => setTransport("livekit")}
-          />
-          LiveKit
-        </label>
-      </fieldset>
-      {livekitState !== "idle" && <p>LiveKit {livekitState}</p>}
-      <div className="service-actions">
-        <button className="session-start" disabled={busy || active} type="button" onClick={() => void start()}>
-          开始会话
-        </button>
-        <button disabled={!active} type="button" onClick={() => void stop()}>
-          停止
-        </button>
-        <button disabled={!active} type="button" onClick={() => void setModeName("operator_speaking")}>
-          接管
-        </button>
-        <button disabled={busy || !active} type="button" onClick={() => void setModeName("ai_active")}>
-          恢复 AI
-        </button>
-        <button disabled={busy || !active} type="button" onClick={() => void setModeName("muted")}>
-          静音
-        </button>
+      <div className="session-conversation" role="region" aria-label="当前轮对话" tabIndex={0}>
+        {!transcript && !reply ? (
+          <div className="session-welcome">
+            <span className="session-welcome-icon"><MessageSquare size={25} strokeWidth={1.5} aria-hidden="true" /></span>
+            <h3>{active ? "正在等待你的输入" : "开始一段新对话"}</h3>
+            <p>{active ? "说出问题，或在下方输入语句。" : "点击「开始会话」，与 AI 虚拟助手交流。"}</p>
+          </div>
+        ) : (
+          <div className="session-turn">
+            <p className="session-turn-label">当前轮</p>
+            {transcript && (
+              <article className="session-bubble session-bubble-user" aria-label="用户转写">
+                <h3>你 <span>· 转写</span></h3>
+                <p>{transcript}</p>
+              </article>
+            )}
+            {reply && (
+              <article className="session-bubble session-bubble-assistant" aria-label="AI 回复">
+                <h3><Bot size={16} aria-hidden="true" />AI 虚拟助手</h3>
+                <p>{reply}</p>
+              </article>
+            )}
+          </div>
+        )}
+        {unusedMaterials && <p className="session-materials-note">本轮未使用资料</p>}
       </div>
-      {transcript && <p>转写 {transcript}</p>}
-      {reply && <p>回复 {reply}</p>}
-      {unusedMaterials && <p>本轮未使用资料</p>}
-      <form className="service-form" onSubmit={submitFinalize}>
-        <label>
-          测试语句
-          <input value={utterance} onChange={(event) => setUtterance(event.target.value)} />
-        </label>
-        <button disabled={busy || !active} type="submit">
-          提交语句
-        </button>
-      </form>
-      <form className="service-form" onSubmit={submitSay}>
-        <label>
-          朗读文本
-          <input value={sayText} onChange={(event) => setSayText(event.target.value)} />
-        </label>
-        <label>
-          纠正内容
-          <input value={correctText} onChange={(event) => setCorrectText(event.target.value)} />
-        </label>
-        <div className="service-actions">
-          <button disabled={busy || !active} type="submit">
-            朗读
-          </button>
-          <button disabled={busy || !active} type="button" onClick={() => void submitRetry()}>
-            重试
-          </button>
-          <button disabled={busy || !active} type="button" onClick={() => void submitCorrect()}>
-            纠正
-          </button>
-          <button disabled={busy || !active} type="button" onClick={() => void submitReport()}>
-            报告
+      <form className="session-compose" onSubmit={submitFinalize}>
+        <label htmlFor="session-utterance">语句输入</label>
+        <div className="session-compose-row">
+          <input
+            id="session-utterance"
+            value={utterance}
+            placeholder={active ? "输入你想说的话…" : "开始会话后发送语句…"}
+            onChange={(event) => setUtterance(event.target.value)}
+          />
+          <button className="button-primary" disabled={busy || !active} type="submit">
+            <ArrowUp size={16} aria-hidden="true" />发送
           </button>
         </div>
       </form>
-      {reportSummary && <p>纪要 {reportSummary}</p>}
-      {reportDetail && <p>{reportDetail}</p>}
+      <details className="session-tools">
+        <summary><Wrench size={15} aria-hidden="true" />会话工具<ChevronDown size={15} className="session-tools-chevron" aria-hidden="true" /></summary>
+        <div className="session-tools-body" role="region" aria-label="会话工具">
+          <form className="service-form session-tool-form" onSubmit={submitSay}>
+            <label htmlFor="session-say">朗读文本</label>
+            <div className="session-tool-row">
+              <input id="session-say" value={sayText} onChange={(event) => setSayText(event.target.value)} placeholder="输入需要 AI 朗读的文本" />
+              <button disabled={busy || !active} type="submit"><Volume2 size={15} aria-hidden="true" />朗读</button>
+            </div>
+          </form>
+          <form className="service-form session-tool-form" onSubmit={(event) => { event.preventDefault(); void submitCorrect(); }}>
+            <label htmlFor="session-correct">纠正内容</label>
+            <div className="session-tool-row">
+              <input id="session-correct" value={correctText} onChange={(event) => setCorrectText(event.target.value)} placeholder="输入修正后的回答" />
+              <button disabled={busy || !active} type="submit">纠正</button>
+            </div>
+          </form>
+          <div className="service-actions">
+            <button disabled={busy || !active} type="button" onClick={() => void submitRetry()}><RotateCcw size={15} aria-hidden="true" />重试</button>
+            <button disabled={busy || !active} type="button" onClick={() => void submitReport()}><FileText size={15} aria-hidden="true" />报告</button>
+          </div>
+          {(reportSummary || reportDetail) && (
+            <section className="session-report" aria-labelledby="session-report-heading">
+              <h3 id="session-report-heading">会话纪要</h3>
+              {reportSummary && <p>{reportSummary}</p>}
+              {reportDetail && <p className="muted">{reportDetail}</p>}
+            </section>
+          )}
+        </div>
+      </details>
     </section>
   );
 }
