@@ -22,6 +22,13 @@ vi.mock("../../api/commands", () => ({
   sessionAgentCommand: vi.fn(),
 }));
 
+vi.mock("./livekit-room", () => ({
+  connectLiveKitRoom: vi.fn(),
+  disconnectLiveKitRoom: vi.fn(),
+}));
+
+import * as livekitRoom from "./livekit-room";
+
 function summary(overrides: Partial<SessionSummary> = {}): SessionSummary {
   return {
     id: "sess-1",
@@ -114,6 +121,8 @@ describe("WorkspaceSession", () => {
       ok: true,
       data: commandResult(),
     });
+    vi.mocked(livekitRoom.connectLiveKitRoom).mockResolvedValue({} as never);
+    vi.mocked(livekitRoom.disconnectLiveKitRoom).mockResolvedValue(undefined);
   });
 
   afterEach(() => {
@@ -138,9 +147,40 @@ describe("WorkspaceSession", () => {
     render(<WorkspaceSession />);
     fireEvent.click(await screen.findByRole("button", { name: "开始" }));
     await waitFor(() => expect(document.body.textContent).toContain("listening"));
-    expect(commands.startSession).toHaveBeenCalled();
+    expect(commands.startSession).toHaveBeenCalledWith("direct");
     expect((screen.getByRole("button", { name: "开始" }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole("button", { name: "停止" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("connects LiveKit with the join token and disconnects on stop", async () => {
+    const join = {
+      url: "wss://livekit.example.test",
+      token: "eyJhbGciOiJIUzI1NiJ9.payload.signature",
+      room: "session-1",
+      identity: "tauri-1",
+      expiresInSec: 60,
+    };
+    vi.mocked(commands.startSession).mockResolvedValue({
+      ok: true,
+      data: {
+        kind: "started",
+        session: summary({ transportMode: "livekit" }),
+        livekit: join,
+      },
+    });
+    vi.mocked(commands.getRuntimeStatus)
+      .mockResolvedValueOnce({ ok: true, data: status() })
+      .mockResolvedValue({ ok: true, data: status({ phase: "listening", seq: 2 }) });
+
+    render(<WorkspaceSession />);
+    fireEvent.click(await screen.findByLabelText("LiveKit"));
+    fireEvent.click(await screen.findByRole("button", { name: "开始" }));
+    await waitFor(() => expect(livekitRoom.connectLiveKitRoom).toHaveBeenCalledWith(join));
+    expect(commands.startSession).toHaveBeenCalledWith("livekit");
+    expect(document.body.textContent).toContain("LiveKit connected");
+
+    fireEvent.click(screen.getByRole("button", { name: "停止" }));
+    await waitFor(() => expect(livekitRoom.disconnectLiveKitRoom).toHaveBeenCalled());
   });
 
   it("surfaces blocked preflight issues and start field errors", async () => {

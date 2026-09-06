@@ -19,6 +19,11 @@ description = "Allows reading whether a legacy local-data switch was applied and
 commands.allow = ["legacy_migration_status"]
 
 [[permission]]
+identifier = "allow-legacy-import-source"
+description = "Allows importing sessions from a user-selected legacy data directory without writing secret material."
+commands.allow = ["legacy_import_source"]
+
+[[permission]]
 identifier = "allow-config-get-public"
 description = "Allows reading the redacted public configuration; secret values are never exposed."
 commands.allow = ["config_get_public"]
@@ -162,6 +167,11 @@ commands.allow = ["material_search"]
 identifier = "allow-material-delete"
 description = "Allows deleting one local material and its indexed rows."
 commands.allow = ["material_delete"]
+
+[[permission]]
+identifier = "allow-material-index"
+description = "Allows the user to explicitly rebuild the local material vector index."
+commands.allow = ["material_index"]
 
 [[permission]]
 identifier = "allow-session-start"

@@ -18,7 +18,7 @@ pub(crate) use cascade::{
 };
 pub use embedding::{EmbeddingError, EmbeddingProbe, OpenAiCompatibleEmbeddingProbe};
 pub(crate) use livekit::room_join_token;
-pub use livekit::{LiveKitError, LiveKitProbe, OfficialLiveKitProbe};
+pub use livekit::{LiveKitError, LiveKitProbe, OfficialLiveKitProbe, livekit_connect_src};
 #[cfg(test)]
 pub(crate) use livekit::{control_url, room_list_token};
 pub use openai_compatible::OpenAiCompatibleProbe;
@@ -26,11 +26,12 @@ pub use openai_compatible::OpenAiCompatibleProbe;
 pub(crate) use openai_compatible::{normalize_models_url, parse_model_catalog};
 #[cfg(test)]
 pub(crate) use openai_realtime::{
-    InputTranscriptAssembler, RealtimeDialectName, RealtimeTransport, realtime_dialect,
-    realtime_url, session_update_event, wait_session_updated,
+    InputTranscriptAssembler, RealtimeDialectName, RealtimeTransport, dialect_input_rate,
+    realtime_dialect, realtime_url, session_update_event, wait_session_updated,
 };
 pub use openai_realtime::{
-    OpenAiCompatibleRealtime, RealtimeError, RealtimeModel, RealtimeTextRequest, RealtimeTurn,
+    OpenAiCompatibleRealtime, RealtimeAudioRequest, RealtimeError, RealtimeModel,
+    RealtimeTextRequest, RealtimeTurn,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

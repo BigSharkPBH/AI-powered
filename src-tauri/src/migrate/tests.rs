@@ -5,10 +5,13 @@ use rusqlite::{Connection, OpenFlags};
 
 use super::{
     LegacyKind, LegacySearchRoot, backup_legacy, backup_legacy_into_app_data, detect_legacy_roots,
-    legacy_migration_status, legacy_search_roots, secret_slots_configured, switch_legacy_archive,
-    try_first_run_legacy_migration, verify_legacy_archive,
+    import_legacy_sessions_from_user_path, legacy_migration_status, legacy_search_roots,
+    secret_slots_configured, switch_legacy_archive, try_first_run_legacy_migration,
+    verify_legacy_archive,
 };
 use crate::config::{AppConfigV1, ConfigDirs};
+use crate::database::Database;
+use crate::sessions::{SessionExportFormat, SessionStore, export_session};
 
 const SECRET_DECOY: &str = "sk-live-migrate-forbidden-key";
 const SAFE_CONFIG: &str = r#"{"configVersion":1}"#;
@@ -875,4 +878,236 @@ fn locator_roots_are_repo_in_dev_and_roaming_parent_in_release() {
         legacy_search_roots(&dirs, false),
         vec![LegacySearchRoot::AppData(dirs.roaming_app_data.clone())]
     );
+}
+
+fn write_legacy_session_sqlite(path: &Path, archived_payload: &str, current_payload: &str) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    let connection = Connection::open(path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE current_session (
+                singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+                payload TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             );
+             CREATE TABLE archived_sessions (
+                session_id TEXT PRIMARY KEY,
+                finished_at TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO archived_sessions(session_id, finished_at, payload, updated_at)
+             VALUES ('legacy-session-1', '2026-01-02T03:05:00Z', ?1, '2026-01-02T03:05:00Z')",
+            [archived_payload],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO current_session(singleton_id, payload, updated_at)
+             VALUES (1, ?1, '2026-01-02T03:04:00Z')",
+            [current_payload],
+        )
+        .unwrap();
+}
+
+fn synthetic_archived_payload() -> String {
+    serde_json::json!({
+        "sessionId": "legacy-session-1",
+        "revision": 1,
+        "status": "finished",
+        "speakingText": "",
+        "candidateName": "合成姓名",
+        "roleName": "合成岗位",
+        "assistantRole": "interviewer",
+        "jobDescription": "",
+        "interviewFocus": "",
+        "consentConfirmed": true,
+        "consentConfirmedAt": "2026-01-02T03:00:00Z",
+        "startedAt": "2026-01-02T03:04:00Z",
+        "finishedAt": "2026-01-02T03:05:00Z",
+        "transcript": [
+            {"role":"candidate","text":"合成会话轮次A","at":"2026-01-02T03:04:05Z"},
+            {"role":"interviewer","text":"合成助手回复A","at":"2026-01-02T03:04:06Z"},
+            {"role":"candidate","text":"合成会话轮次B","at":"2026-01-02T03:04:07Z"},
+            {"role":"interviewer","text":"合成助手回复B","at":"2026-01-02T03:04:08Z"}
+        ],
+        "report": null,
+        "resumeIds": [],
+        "resumeId": ""
+    })
+    .to_string()
+}
+
+fn idle_current_payload() -> String {
+    serde_json::json!({
+        "sessionId": "",
+        "revision": 0,
+        "status": "idle",
+        "speakingText": "",
+        "candidateName": "",
+        "roleName": "",
+        "assistantRole": "interviewer",
+        "jobDescription": "",
+        "interviewFocus": "",
+        "consentConfirmed": false,
+        "consentConfirmedAt": null,
+        "startedAt": null,
+        "finishedAt": null,
+        "transcript": [],
+        "report": null,
+        "resumeIds": [],
+        "resumeId": ""
+    })
+    .to_string()
+}
+
+#[test]
+fn first_run_imports_legacy_session_tables_into_new_schema() {
+    let repo = tempfile::tempdir().unwrap();
+    write(&repo.path().join("config/local.json"), SAFE_CONFIG);
+    let source_sqlite = repo.path().join("data/app.sqlite");
+    write_legacy_session_sqlite(
+        &source_sqlite,
+        &synthetic_archived_payload(),
+        &idle_current_payload(),
+    );
+    let source_hash = crate::materials::backup::file_sha256(&source_sqlite).unwrap();
+    let dest = tempfile::tempdir().unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 9, 6, 4, 0, 0).unwrap();
+
+    try_first_run_legacy_migration(
+        dest.path(),
+        &[LegacySearchRoot::Repository(repo.path().to_path_buf())],
+        dest.path(),
+        now,
+    )
+    .unwrap()
+    .expect("legacy switch should apply");
+
+    assert!(dest.path().join("migrated-from").is_file());
+    assert_eq!(
+        crate::materials::backup::file_sha256(&source_sqlite).unwrap(),
+        source_hash,
+        "source sqlite must stay untouched"
+    );
+
+    let database = Database::open(dest.path().join("app.sqlite3")).unwrap();
+    database.migrate().unwrap();
+    let store = SessionStore::new(&database);
+    let sessions = store.list().unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].id, "legacy-session-1");
+    assert_eq!(sessions[0].status, "completed");
+    assert_eq!(
+        sessions[0].started_at.as_deref(),
+        Some("2026-01-02T03:04:00Z")
+    );
+    assert_eq!(
+        sessions[0].finished_at.as_deref(),
+        Some("2026-01-02T03:05:00Z")
+    );
+    assert_ne!(sessions[0].role_profile_id, "合成姓名");
+
+    let turns = store.list_turns("legacy-session-1").unwrap();
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[0].user_text, "合成会话轮次A");
+    assert_eq!(turns[0].assistant_text, "合成助手回复A");
+    assert_eq!(turns[0].created_at, "2026-01-02T03:04:05Z");
+    assert_eq!(turns[1].user_text, "合成会话轮次B");
+    assert_eq!(turns[1].assistant_text, "合成助手回复B");
+
+    let export_dir = dest.path().join("export");
+    let markdown = export_session(
+        &store,
+        "legacy-session-1",
+        SessionExportFormat::Markdown,
+        &export_dir,
+    )
+    .unwrap();
+    let body = fs::read_to_string(markdown).unwrap();
+    assert!(body.contains("合成会话轮次A"));
+    assert!(body.contains("合成助手回复B"));
+    assert!(!body.contains("合成姓名"));
+}
+
+#[test]
+fn first_run_does_not_mark_success_when_legacy_payload_is_unreadable() {
+    let repo = tempfile::tempdir().unwrap();
+    write(&repo.path().join("config/local.json"), SAFE_CONFIG);
+    write_legacy_session_sqlite(
+        &repo.path().join("data/app.sqlite"),
+        "{not-json",
+        &idle_current_payload(),
+    );
+    let dest = tempfile::tempdir().unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 9, 6, 4, 1, 0).unwrap();
+
+    assert!(
+        try_first_run_legacy_migration(
+            dest.path(),
+            &[LegacySearchRoot::Repository(repo.path().to_path_buf())],
+            dest.path(),
+            now,
+        )
+        .is_err()
+    );
+    assert!(!dest.path().join("migrated-from").exists());
+    assert!(repo.path().join("data/app.sqlite").is_file());
+}
+
+#[test]
+fn desktop_runtime_layout_is_detected_from_repository_root() {
+    let repo = tempfile::tempdir().unwrap();
+    write_legacy_session_sqlite(
+        &repo.path().join(".desktop-runtime/data/app.sqlite"),
+        &synthetic_archived_payload(),
+        &idle_current_payload(),
+    );
+
+    let found = detect_legacy_roots(&[LegacySearchRoot::Repository(repo.path().to_path_buf())]);
+    assert_eq!(found.len(), 1);
+    assert_eq!(
+        found[0].sqlite_path.as_deref(),
+        Some(
+            repo.path()
+                .join(".desktop-runtime/data/app.sqlite")
+                .as_path()
+        )
+    );
+}
+
+#[test]
+fn user_selected_desktop_runtime_imports_into_existing_dest_schema() {
+    let source = tempfile::tempdir().unwrap();
+    let sqlite = source.path().join(".desktop-runtime/data/app.sqlite");
+    write_legacy_session_sqlite(
+        &sqlite,
+        &synthetic_archived_payload(),
+        &idle_current_payload(),
+    );
+    let source_hash = crate::materials::backup::file_sha256(&sqlite).unwrap();
+
+    let dest = tempfile::tempdir().unwrap();
+    let database = Database::open(dest.path().join("app.sqlite3")).unwrap();
+    database.migrate().unwrap();
+
+    let imported = import_legacy_sessions_from_user_path(source.path(), &database).unwrap();
+    assert_eq!(imported.sessions, 1);
+    assert_eq!(imported.turns, 2);
+    assert_eq!(
+        crate::materials::backup::file_sha256(&sqlite).unwrap(),
+        source_hash
+    );
+    assert!(!dest.path().join("migrated-from").exists());
+
+    let store = SessionStore::new(&database);
+    let turns = store.list_turns("legacy-session-1").unwrap();
+    assert_eq!(turns[0].user_text, "合成会话轮次A");
+    assert_eq!(turns[1].assistant_text, "合成助手回复B");
 }

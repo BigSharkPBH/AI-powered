@@ -1,5 +1,5 @@
 import { spawn, execFile } from "node:child_process";
-import { access, mkdtemp, readdir, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { constants } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, relative, resolve } from "node:path";
@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 const execFileAsync = promisify(execFile);
 const WINDOW_TIMEOUT_MS = 15_000;
+const ISOLATION_SUPPORT_MARKER = "AI_VIRTUAL_ASSISTANT_ISOLATION_V1";
 const FORBIDDEN_PROCESS_NAMES = new Set([
   "node.exe",
   "control-api",
@@ -27,6 +28,56 @@ export async function requirePackagedExecutable(executablePath) {
     throw new Error(`Packaged executable does not exist: ${absolutePath}`);
   }
   return absolutePath;
+}
+
+export function buildIsolatedLaunchEnvironment(sourceEnvironment, webviewDataFolder) {
+  const environment = Object.fromEntries(
+    Object.entries(sourceEnvironment).filter(([key]) => !new Set([
+      "APPDATA",
+      "LOCALAPPDATA",
+      "AI_VIRTUAL_ASSISTANT_CONFIG",
+    ]).has(key.toUpperCase()) && !key.toUpperCase().startsWith("WEBVIEW2_")),
+  );
+  if (webviewDataFolder !== undefined) {
+    environment.WEBVIEW2_USER_DATA_FOLDER = webviewDataFolder;
+  }
+  return environment;
+}
+
+export async function verifyIsolationSupport(executablePath, dependencies = {}) {
+  const readBinary = dependencies.readBinary ?? readFile;
+  const runProbe = dependencies.runProbe ?? execFileAsync;
+  const binary = await readBinary(executablePath);
+  if (!Buffer.from(binary).includes(Buffer.from(ISOLATION_SUPPORT_MARKER))) {
+    throw new Error(`Packaged executable does not contain the isolation support marker: ${executablePath}`);
+  }
+  const { stdout } = await runProbe(executablePath, ["--check-isolation-support"], {
+    env: buildIsolatedLaunchEnvironment(process.env),
+    windowsHide: true,
+    timeout: 5_000,
+  });
+  if (stdout !== ISOLATION_SUPPORT_MARKER) {
+    throw new Error(`Packaged executable returned an invalid isolation support response: ${executablePath}`);
+  }
+}
+
+export async function assertIsolationArtifacts(isolatedRoot) {
+  const required = [
+    [join(isolatedRoot, "config", "local.json"), "file"],
+    [join(isolatedRoot, "data", "app.sqlite3"), "file"],
+    [join(isolatedRoot, "logs"), "directory"],
+    [join(isolatedRoot, "webview"), "directory"],
+  ];
+  for (const [path, expectedKind] of required) {
+    let metadata;
+    try {
+      metadata = await stat(path);
+    } catch {
+      throw new Error(`Missing isolated startup artifact: ${path}`);
+    }
+    const matches = expectedKind === "file" ? metadata.isFile() : metadata.isDirectory();
+    if (!matches) throw new Error(`Invalid isolated startup artifact: ${path} must be a ${expectedKind}`);
+  }
 }
 
 async function listFiles(directory, root = directory) {
@@ -145,31 +196,33 @@ async function runPackageSmoke() {
     process.env.TAURI_SMOKE_BUNDLE ?? join(repositoryRoot, "src-tauri", "target", "release", "bundle"),
   );
   await assertBundleContainsNoPrivateFiles(bundleDirectory);
+  await verifyIsolationSupport(executable);
 
   const isolatedRoot = await mkdtemp(join(tmpdir(), "ai-virtual-assistant-tauri-smoke-"));
   let child;
   try {
-    child = spawn(executable, [], {
+    child = spawn(executable, ["--isolated-root", isolatedRoot], {
       cwd: repositoryRoot,
-      env: {
-        ...process.env,
-        APPDATA: join(isolatedRoot, "roaming"),
-        LOCALAPPDATA: join(isolatedRoot, "local"),
-        AI_VIRTUAL_ASSISTANT_CONFIG: join(isolatedRoot, "config", "local.json"),
-      },
+      env: buildIsolatedLaunchEnvironment(process.env, join(isolatedRoot, "webview")),
       stdio: "ignore",
       windowsHide: false,
     });
     const snapshot = await waitForVisibleWindow(child.pid);
     assertAllowedProcessTree(snapshot.processes.filter(({ processId }) => processId !== child.pid));
+    await assertIsolationArtifacts(isolatedRoot);
     await requestWindowClose(child.pid);
     const exitCode = await waitForExit(child, 5_000);
     if (exitCode !== 0) throw new Error(`Packaged application exited with code ${exitCode}`);
-    console.log(`PASS: ${basename(executable)} opened a visible window with no forbidden child process and exited cleanly.`);
   } finally {
-    if (child && child.exitCode === null) child.kill();
-    await rm(isolatedRoot, { recursive: true, force: true });
+    if (child && child.exitCode === null) {
+      child.kill();
+      await waitForExit(child, 5_000);
+    }
+    // WebView2 can release cache handles shortly after its host has exited.
+    // Node retries EBUSY/EPERM/ENOTEMPTY with bounded linear backoff (<= 21 s).
+    await rm(isolatedRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
+  console.log(`PASS: ${basename(executable)} opened an isolated visible window with no forbidden child process, exited cleanly, and its temporary data was removed.`);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

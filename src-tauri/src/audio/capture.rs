@@ -133,7 +133,7 @@ impl AudioCapture {
     pub fn spawn_bridge(
         exe: &Path,
         pid: u32,
-        enumerator: &impl crate::processes::ProcessEnumerator,
+        enumerator: &(impl crate::processes::ProcessEnumerator + ?Sized),
     ) -> Result<Self, AudioError> {
         if pid == 0 {
             return Err(AudioError::InvalidPid);

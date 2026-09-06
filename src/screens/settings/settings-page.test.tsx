@@ -7,6 +7,7 @@ import { SettingsPage } from "./settings-page";
 vi.mock("../../api/commands", () => ({
   getConfigPublic: vi.fn(),
   getLegacyMigrationStatus: vi.fn(),
+  importLegacySource: vi.fn(),
   saveRoleProfile: vi.fn(),
   copyRoleProfile: vi.fn(),
   activateRoleProfile: vi.fn(),
@@ -68,6 +69,11 @@ describe("SettingsPage", () => {
   it("includes the role editor", async () => {
     render(<SettingsPage />);
     expect(await screen.findByRole("heading", { name: "角色" })).toBeTruthy();
+  });
+
+  it("includes the legacy session import panel", async () => {
+    render(<SettingsPage />);
+    expect(await screen.findByRole("heading", { name: "导入旧会话" })).toBeTruthy();
   });
 
   it("shows 需要重新填写密钥 when migration status asks to reenter secrets", async () => {

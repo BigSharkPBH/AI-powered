@@ -12,7 +12,7 @@ use crate::{
     diagnostics::{DiagnosticError, DiagnosticEvent, DiagnosticWriter},
     error::PublicError,
     migrate::{self, LegacySearchRoot},
-    secrets::{SecretService, SecretStore, WindowsSecretStore},
+    secrets::{SecretError, SecretService, SecretStore, WindowsSecretStore},
     services::{SessionControl, SessionService},
     sessions::SessionStore,
 };
@@ -44,6 +44,8 @@ pub struct AppState {
 pub enum AppStateError {
     #[error(transparent)]
     Diagnostics(#[from] DiagnosticError),
+    #[error(transparent)]
+    Secrets(#[from] SecretError),
 }
 
 impl AppState {
@@ -51,8 +53,23 @@ impl AppState {
         Self::initialize(paths, Arc::new(WindowsSecretStore::new()))
     }
 
+    pub fn production_namespaced(
+        paths: AppPaths,
+        secret_namespace: String,
+    ) -> Result<Self, AppStateError> {
+        Self::initialize_namespaced(paths, secret_namespace, Arc::new(WindowsSecretStore::new()))
+    }
+
     pub fn initialize(
         paths: AppPaths,
+        secret_store: Arc<dyn SecretStore>,
+    ) -> Result<Self, AppStateError> {
+        Self::initialize_namespaced(paths, "default", secret_store)
+    }
+
+    pub fn initialize_namespaced(
+        paths: AppPaths,
+        secret_namespace: impl Into<String>,
         secret_store: Arc<dyn SecretStore>,
     ) -> Result<Self, AppStateError> {
         std::fs::create_dir_all(&paths.data_directory).map_err(|_| DiagnosticError::Operation)?;
@@ -77,8 +94,7 @@ impl AppState {
             });
         }
         adopt_switched_config(&paths);
-        let secrets =
-            SecretService::new("default", secret_store).expect("static namespace is valid");
+        let secrets = SecretService::new(secret_namespace, secret_store)?;
         let secret_backend_ready = secrets.status("system/startup-probe").is_ok();
         let config = ConfigStore::new(paths.config_path.clone());
         let mut startup = if secret_backend_ready {
@@ -101,7 +117,7 @@ impl AppState {
         let database = if secret_backend_ready
             && matches!(startup, StartupState::Ready | StartupState::Migrated)
         {
-            match open_and_recover(&database_path) {
+            match open_and_recover(&database_path, &paths.data_directory, &config) {
                 Ok(database) => Some(database),
                 Err(error) => {
                     startup = StartupState::Invalid {
@@ -161,7 +177,11 @@ impl AppState {
                 error: public_startup_error(error.code()),
             }
         } else {
-            match open_and_recover(&self.database_path) {
+            match open_and_recover(
+                &self.database_path,
+                &self.paths.data_directory,
+                &self.config,
+            ) {
                 Ok(database) => {
                     if let Ok(mut slot) = self.database.lock() {
                         *slot = Some(database);
@@ -190,8 +210,17 @@ fn adopt_switched_config(paths: &AppPaths) {
     }
 }
 
-fn open_and_recover(path: &std::path::Path) -> Result<Database, DatabaseError> {
+fn open_and_recover(
+    path: &std::path::Path,
+    data_directory: &std::path::Path,
+    config: &ConfigStore,
+) -> Result<Database, DatabaseError> {
     let database = Database::open(path)?;
+    if data_directory.join(".restore-journal.json").is_file() {
+        crate::materials::BackupService::new(&database, data_directory, config)
+            .recover_interrupted_restore()
+            .map_err(|_| DatabaseError::Operation)?;
+    }
     database.migrate()?;
     SessionStore::new(&database).mark_interrupted_open()?;
     Ok(database)

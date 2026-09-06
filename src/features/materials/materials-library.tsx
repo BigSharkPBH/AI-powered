@@ -107,6 +107,13 @@ export function MaterialsLibrary({ selectPath }: MaterialsLibraryProps) {
         <button disabled={busy} type="submit">
           导入
         </button>
+        <button
+          disabled={busy}
+          type="button"
+          onClick={() => void run(() => api.indexMaterials(), "索引已重建")}
+        >
+          重建索引
+        </button>
       </form>
       <form className="service-form" onSubmit={submitSearch}>
         <label>

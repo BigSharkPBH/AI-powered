@@ -20,8 +20,12 @@ use crate::{
     },
 };
 
+mod sessions;
+
 #[cfg(test)]
 mod tests;
+
+pub use sessions::{LegacySessionImport, import_legacy_sessions_from_sqlite};
 
 const ARCHIVE_MANIFEST: &str = "manifest.json";
 const ARCHIVE_CONFIG: &str = "config.json";
@@ -52,6 +56,7 @@ pub enum LegacyKind {
 pub enum LegacySearchRoot {
     Repository(PathBuf),
     AppData(PathBuf),
+    UserSelected(PathBuf),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +82,7 @@ pub enum MigrateError {
     Integrity,
     SecretForbidden,
     AlreadyApplied,
+    PayloadInvalid,
 }
 
 impl MigrateError {
@@ -87,6 +93,7 @@ impl MigrateError {
             Self::Integrity => "MIGRATE_INTEGRITY_FAILED",
             Self::SecretForbidden => "MIGRATE_SECRET_FORBIDDEN",
             Self::AlreadyApplied => "MIGRATE_ALREADY_APPLIED",
+            Self::PayloadInvalid => "MIGRATE_PAYLOAD_INVALID",
         }
     }
 }
@@ -138,7 +145,21 @@ pub fn try_first_run_legacy_migration(
     };
     let backup = backup_legacy_into_app_data(&root, app_data, now)?;
     let _verified = verify_legacy_archive(&backup.archive_path)?;
-    switch_legacy_archive(&backup.archive_path, dest_data_dir).map(Some)
+    let report = switch_legacy_archive(&backup.archive_path, dest_data_dir)?;
+    if let Err(error) = sessions::complete_legacy_session_import(dest_data_dir) {
+        rollback_failed_semantic_import(dest_data_dir);
+        return Err(error);
+    }
+    Ok(Some(report))
+}
+
+pub fn import_legacy_sessions_from_user_path(
+    source: &Path,
+    dest: &Database,
+) -> Result<LegacySessionImport, MigrateError> {
+    let root = detect_user_selected(source).ok_or(MigrateError::Operation)?;
+    let sqlite = root.sqlite_path.ok_or(MigrateError::Operation)?;
+    sessions::import_legacy_sessions_from_sqlite(&sqlite, dest)
 }
 
 pub fn secret_slots_configured(config: &AppConfigV1) -> bool {
@@ -319,6 +340,11 @@ pub fn detect_legacy_roots(roots: &[LegacySearchRoot]) -> Vec<LegacyRoot> {
                     }
                 }
             }
+            LegacySearchRoot::UserSelected(path) => {
+                if let Some(detected) = detect_user_selected(path) {
+                    push_unique(&mut found, detected);
+                }
+            }
         }
     }
     found
@@ -467,6 +493,13 @@ fn collect_material_keys_into(
         }
     }
     Ok(())
+}
+
+fn rollback_failed_semantic_import(dest_data_dir: &Path) {
+    let _ = fs::remove_file(dest_data_dir.join(MIGRATED_FROM));
+    let _ = fs::remove_file(dest_data_dir.join(DEST_SQLITE));
+    let _ = fs::remove_file(dest_data_dir.join(format!("{DEST_SQLITE}-wal")));
+    let _ = fs::remove_file(dest_data_dir.join(format!("{DEST_SQLITE}-shm")));
 }
 
 fn dest_already_applied(dest: &Path) -> bool {
@@ -658,10 +691,7 @@ struct MigratedFromMarker {
 
 fn detect_repository(repository: &Path) -> Option<LegacyRoot> {
     let config_path = first_existing_file([repository.join("config").join("local.json")]);
-    let sqlite_path = first_existing_file([
-        repository.join("data").join("app.sqlite"),
-        repository.join("data").join("app.sqlite3"),
-    ]);
+    let sqlite_path = first_existing_file(legacy_sqlite_candidates(repository));
     let materials_path = existing_dir(repository.join("data").join(ARCHIVE_MATERIALS));
     let has_avatar = repository.join("data").join("avatar").is_dir()
         || repository.join("data").join("avatars").is_dir();
@@ -683,12 +713,16 @@ fn detect_electron_user_data(user_data: &Path) -> Option<LegacyRoot> {
         user_data.join("local.json"),
         user_data.join("config").join("local.json"),
     ]);
-    let sqlite_path = first_existing_file([
-        user_data.join("app.sqlite"),
-        user_data.join("app.sqlite3"),
-        user_data.join("data").join("app.sqlite"),
-        user_data.join("data").join("app.sqlite3"),
-    ]);
+    let sqlite_path = first_existing_file(
+        [
+            user_data.join("app.sqlite"),
+            user_data.join("app.sqlite3"),
+            user_data.join("data").join("app.sqlite"),
+            user_data.join("data").join("app.sqlite3"),
+        ]
+        .into_iter()
+        .chain(legacy_sqlite_candidates(user_data)),
+    );
     let materials_path = existing_dir(user_data.join(ARCHIVE_MATERIALS))
         .or_else(|| existing_dir(user_data.join("data").join(ARCHIVE_MATERIALS)));
     if config_path.is_none() && sqlite_path.is_none() {
@@ -712,6 +746,71 @@ fn push_unique(found: &mut Vec<LegacyRoot>, candidate: LegacyRoot) {
 
 fn first_existing_file(paths: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
     paths.into_iter().find(|path| path.is_file())
+}
+
+fn legacy_sqlite_candidates(root: &Path) -> Vec<PathBuf> {
+    vec![
+        root.join("data").join("app.sqlite"),
+        root.join("data").join("app.sqlite3"),
+        root.join(".desktop-runtime")
+            .join("data")
+            .join("app.sqlite"),
+        root.join(".desktop-runtime")
+            .join("data")
+            .join("app.sqlite3"),
+        root.join("resources")
+            .join(".desktop-runtime")
+            .join("data")
+            .join("app.sqlite"),
+        root.join("resources")
+            .join(".desktop-runtime")
+            .join("data")
+            .join("app.sqlite3"),
+    ]
+}
+
+fn detect_user_selected(path: &Path) -> Option<LegacyRoot> {
+    if path.is_file() {
+        return Some(LegacyRoot {
+            kind: LegacyKind::Repository,
+            path: path.parent().unwrap_or(path).to_path_buf(),
+            config_path: None,
+            sqlite_path: Some(path.to_path_buf()),
+            materials_path: None,
+        });
+    }
+    detect_desktop_runtime(path)
+        .or_else(|| detect_repository(path))
+        .or_else(|| detect_electron_user_data(path))
+}
+
+fn detect_desktop_runtime(root: &Path) -> Option<LegacyRoot> {
+    let runtime = if root
+        .file_name()
+        .is_some_and(|name| name == ".desktop-runtime")
+    {
+        root.to_path_buf()
+    } else if root.join(".desktop-runtime").is_dir() {
+        root.join(".desktop-runtime")
+    } else if root.join("resources").join(".desktop-runtime").is_dir() {
+        root.join("resources").join(".desktop-runtime")
+    } else {
+        return None;
+    };
+    let sqlite_path = first_existing_file([
+        runtime.join("data").join("app.sqlite"),
+        runtime.join("data").join("app.sqlite3"),
+        runtime.join("app.sqlite"),
+        runtime.join("app.sqlite3"),
+    ]);
+    sqlite_path.as_ref()?;
+    Some(LegacyRoot {
+        kind: LegacyKind::Repository,
+        path: runtime,
+        config_path: None,
+        sqlite_path,
+        materials_path: None,
+    })
 }
 
 fn existing_dir(path: PathBuf) -> Option<PathBuf> {

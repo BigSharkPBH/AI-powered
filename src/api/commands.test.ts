@@ -20,7 +20,9 @@ import {
   startSession,
   getConfigPublic,
   getLegacyMigrationStatus,
+  importLegacySource,
   importMaterial,
+  indexMaterials,
   listMaterials,
   saveEmbeddingConfig,
   saveLiveKitSettings,
@@ -52,6 +54,20 @@ describe("legacy migration adapter", () => {
       ok: true,
       data: { applied: true, reenterSecrets: true, omitted: [] },
     });
+  });
+
+  it("invokes legacy_import_source with the selected path", async () => {
+    invokeMock.mockResolvedValue({
+      ok: true,
+      data: { sessions: 1, turns: 2 },
+    });
+
+    const result = await importLegacySource("E:\\\\old-install");
+
+    expect(invokeMock).toHaveBeenCalledWith("legacy_import_source", {
+      path: "E:\\\\old-install",
+    });
+    expect(result).toEqual({ ok: true, data: { sessions: 1, turns: 2 } });
   });
 });
 
@@ -180,10 +196,12 @@ describe("materials adapters", () => {
     await searchMaterials("订单服务", 5);
     await searchMaterials("订单");
     await deleteMaterial("material-1");
+    await indexMaterials();
     expect(invokeMock).toHaveBeenNthCalledWith(1, "material_list");
     expect(invokeMock).toHaveBeenNthCalledWith(2, "material_import", { path: "E:/docs/resume.md" });
     expect(invokeMock).toHaveBeenNthCalledWith(3, "material_search", { query: "订单服务", topK: 5 });
     expect(invokeMock).toHaveBeenNthCalledWith(4, "material_search", { query: "订单", topK: undefined });
     expect(invokeMock).toHaveBeenNthCalledWith(5, "material_delete", { id: "material-1" });
+    expect(invokeMock).toHaveBeenNthCalledWith(6, "material_index");
   });
 });

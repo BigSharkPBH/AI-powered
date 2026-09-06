@@ -1076,7 +1076,8 @@ mod openai_realtime {
 
     use super::super::{
         InputTranscriptAssembler, RealtimeDialectName, RealtimeError, RealtimeTransport,
-        realtime_dialect, realtime_url, session_update_event, wait_session_updated,
+        dialect_input_rate, realtime_dialect, realtime_url, session_update_event,
+        wait_session_updated,
     };
 
     struct FakeSocket {
@@ -1262,5 +1263,15 @@ mod openai_realtime {
         assert_eq!(custom["session"]["voice"], "custom-voice");
         assert!(aliyun["session"].get("input_audio_transcription").is_none());
         assert_eq!(aliyun["type"], "session.update");
+        assert_eq!(
+            dialect_input_rate(&realtime_dialect("https://api.openai.com/v1")),
+            24_000
+        );
+        assert_eq!(
+            dialect_input_rate(&realtime_dialect(
+                "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            )),
+            16_000
+        );
     }
 }

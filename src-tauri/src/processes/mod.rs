@@ -121,7 +121,7 @@ pub fn filter_meeting_processes(processes: Vec<MeetingProcess>) -> Vec<MeetingPr
 }
 
 pub fn list_meeting_processes(
-    enumerator: &impl ProcessEnumerator,
+    enumerator: &(impl ProcessEnumerator + ?Sized),
 ) -> Result<Vec<MeetingProcess>, ProcessError> {
     Ok(filter_meeting_processes(enumerator.list()?))
 }

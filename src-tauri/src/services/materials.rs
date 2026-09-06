@@ -4,7 +4,7 @@ use serde::Serialize;
 use ts_rs::TS;
 
 use crate::{
-    config::ConfigStore,
+    config::{ConfigError, ConfigStore},
     database::{Database, DatabaseError},
     materials::{
         BackupError, BackupService, CHUNKER_VERSION, MaterialStore, NewMaterial, ParseError,
@@ -13,7 +13,8 @@ use crate::{
         parser_version,
         store::sha256_hex,
     },
-    providers::EmbeddingProbe,
+    providers::{EmbeddingError, EmbeddingProbe, ProviderEndpoint},
+    secrets::{SecretError, SecretService},
 };
 
 pub use crate::materials::{EmbeddingSpace, MaterialSearchHit};
@@ -35,6 +36,15 @@ pub struct MaterialSummary {
     pub chunk_count: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct MaterialIndexResult {
+    #[ts(type = "number")]
+    pub indexed_chunks: i64,
+    pub status: String,
+}
+
 #[derive(Debug)]
 pub enum MaterialServiceError {
     TypeUnsupported,
@@ -44,7 +54,14 @@ pub enum MaterialServiceError {
     ParseFailed,
     NotFound,
     PathInvalid,
+    ParseBudget,
     Operation,
+    EmbeddingNotReady,
+    EmbeddingNotFound,
+    EmbeddingFieldsInvalid,
+    Embedding(EmbeddingError),
+    Secret(SecretError),
+    Config(ConfigError),
 }
 
 impl MaterialServiceError {
@@ -57,7 +74,14 @@ impl MaterialServiceError {
             Self::ParseFailed => "MATERIAL_PARSE_FAILED",
             Self::NotFound => "MATERIAL_NOT_FOUND",
             Self::PathInvalid => "MATERIAL_PATH_INVALID",
+            Self::ParseBudget => "MATERIAL_PARSE_BUDGET",
             Self::Operation => "MATERIAL_OPERATION_FAILED",
+            Self::EmbeddingNotReady => "EMBEDDING_NOT_READY",
+            Self::EmbeddingNotFound => "EMBEDDING_NOT_FOUND",
+            Self::EmbeddingFieldsInvalid => "EMBEDDING_FIELDS_INVALID",
+            Self::Embedding(error) => error.code(),
+            Self::Secret(error) => error.code(),
+            Self::Config(error) => error.code(),
         }
     }
 }
@@ -74,6 +98,7 @@ impl From<ParseError> for MaterialServiceError {
             ParseError::NotUtf8 => Self::NotUtf8,
             ParseError::NoTextLayer => Self::NoTextLayer,
             ParseError::ParseFailed => Self::ParseFailed,
+            ParseError::BudgetExceeded => Self::ParseBudget,
         }
     }
 }
@@ -200,6 +225,87 @@ impl<'a> MaterialService<'a> {
     ) -> Result<(), MaterialServiceError> {
         hybrid::index_chunks(self.database, space, probe)?;
         Ok(())
+    }
+
+    pub fn index_library(
+        &self,
+        config: &ConfigStore,
+        secrets: &SecretService,
+        probe: &dyn EmbeddingProbe,
+    ) -> Result<MaterialIndexResult, MaterialServiceError> {
+        let loaded = config.load().map_err(MaterialServiceError::Config)?;
+        let embedding_id = loaded
+            .knowledge
+            .active_embedding_config_id
+            .as_deref()
+            .ok_or(MaterialServiceError::EmbeddingNotReady)?;
+        let embedding = loaded
+            .knowledge
+            .embedding_configs
+            .iter()
+            .find(|item| item.id == embedding_id)
+            .ok_or(MaterialServiceError::EmbeddingNotFound)?;
+        if !embedding.active {
+            return Err(MaterialServiceError::EmbeddingNotReady);
+        }
+        let provider = loaded
+            .models
+            .providers
+            .iter()
+            .find(|item| item.id == embedding.provider_id)
+            .ok_or(MaterialServiceError::EmbeddingFieldsInvalid)?;
+        if provider.base_url.trim().is_empty() {
+            return Err(MaterialServiceError::EmbeddingFieldsInvalid);
+        }
+        let credential = provider
+            .credential
+            .as_ref()
+            .filter(|slot| slot.configured)
+            .map(|slot| secrets.read(&slot.reference))
+            .transpose()
+            .map_err(MaterialServiceError::Secret)?
+            .flatten();
+        if provider
+            .credential
+            .as_ref()
+            .is_some_and(|slot| slot.configured)
+            && credential.is_none()
+        {
+            return Err(MaterialServiceError::Secret(SecretError::Backend));
+        }
+        let space = EmbeddingSpace {
+            provider_id: embedding.provider_id.clone(),
+            model_id: embedding.model_id.clone(),
+            dimensions: embedding.dimensions,
+            normalized: embedding.normalized,
+        };
+        let endpoint = ProviderEndpoint {
+            provider_id: provider.id.clone(),
+            base_url: provider.base_url.clone(),
+        };
+        hybrid::index_chunks_at(
+            self.database,
+            &space,
+            probe,
+            &endpoint,
+            credential.as_ref().map(|value| value.as_str()),
+        )?;
+        let indexed_chunks = self.database.with_connection(|connection| {
+            connection.query_row(
+                "SELECT COUNT(*) FROM material_chunks WHERE embedding_status = 'ready'",
+                [],
+                |row| row.get(0),
+            )
+        })?;
+        let status = if indexed_chunks > 0 {
+            "vector_ready"
+        } else {
+            "text_ready"
+        };
+        Ok(MaterialIndexResult {
+            indexed_chunks,
+            status: status.into(),
+        })
     }
 
     pub fn search_hybrid(
@@ -666,6 +772,57 @@ mod tests {
                 "query {query:?} must not fail solely due to FTS operator parsing"
             );
         }
+    }
+
+    #[test]
+    fn search_text_recalls_natural_chinese_questions() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("resume.md");
+        std::fs::write(&source, "工作经历\n负责订单服务与 Kafka 链路优化。").unwrap();
+        let database = opened(&directory);
+        let service = MaterialService::new(&database, directory.path());
+        let imported = service.import_file(&source).unwrap();
+
+        for query in ["订单服务", "请介绍你做过的订单服务项目", "订单服务 Kafka"]
+        {
+            let hits = service
+                .search_text(query, None)
+                .unwrap_or_else(|error| panic!("query {query:?} failed: {}", error.code()));
+            assert_eq!(
+                hits.len(),
+                1,
+                "query {query:?} should recall the imported note"
+            );
+            assert_eq!(hits[0].material_id, imported.id);
+            assert!(
+                hits[0].snippet.contains("订单服务"),
+                "query {query:?} snippet {:?}",
+                hits[0].snippet
+            );
+        }
+    }
+
+    #[test]
+    fn search_text_quoted_exact_phrase_does_not_over_match() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("resume.md");
+        std::fs::write(&source, "工作经历\n负责订单服务与 Kafka 链路优化。").unwrap();
+        let database = opened(&directory);
+        let service = MaterialService::new(&database, directory.path());
+        service.import_file(&source).unwrap();
+
+        assert!(
+            service
+                .search_text("\"请介绍你做过的订单服务项目\"", None)
+                .unwrap()
+                .is_empty(),
+            "quoted natural question must stay exact-phrase and miss"
+        );
+        let exact = service
+            .search_text("\"负责订单服务与 Kafka 链路优化\"", None)
+            .unwrap();
+        assert_eq!(exact.len(), 1);
+        assert!(exact[0].snippet.contains("订单服务"));
     }
 
     #[test]
@@ -1219,6 +1376,148 @@ mod tests {
             .unwrap();
         assert_eq!(after[0].material_id, imported.id);
         assert_ne!(after, service.search_text("订单服务", None).unwrap());
+    }
+
+    #[test]
+    fn import_does_not_index_and_index_library_uses_endpoint_and_credential() {
+        use std::sync::{Arc, Mutex};
+
+        use crate::{
+            config::ConfigStore,
+            secrets::{MemorySecretStore, SecretService},
+            services::{
+                EmbeddingConfigSaveInput, EmbeddingService, ProviderSaveInput, ProviderService,
+            },
+        };
+
+        struct RecordingProbe {
+            calls: Mutex<Vec<(String, Option<String>, String)>>,
+        }
+
+        impl crate::providers::EmbeddingProbe for RecordingProbe {
+            fn embed(
+                &self,
+                endpoint: &crate::providers::ProviderEndpoint,
+                credential: Option<&str>,
+                _: &str,
+                dimensions: u32,
+                input: &str,
+            ) -> Result<Vec<f32>, crate::providers::EmbeddingError> {
+                self.calls.lock().unwrap().push((
+                    endpoint.base_url.clone(),
+                    credential.map(str::to_owned),
+                    input.to_owned(),
+                ));
+                Ok(vec![0.25; dimensions as usize])
+            }
+        }
+
+        struct NoopProviderProbe;
+
+        impl crate::providers::ProviderProbe for NoopProviderProbe {
+            fn discover_models(
+                &self,
+                _: &crate::providers::ProviderEndpoint,
+                _: Option<&str>,
+            ) -> Result<Vec<crate::providers::DiscoveredModel>, crate::providers::ProviderError>
+            {
+                Ok(vec![])
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let database = opened(&directory);
+        let service = MaterialService::new(&database, directory.path());
+        let imported = service
+            .import_file(write_import(
+                &directory,
+                "resume.md",
+                "负责订单服务与 Kafka 链路优化。",
+            ))
+            .unwrap();
+        assert_eq!(imported.status, "text_ready");
+        assert!(
+            chunk_embedding_rows(&database)
+                .iter()
+                .all(|(_, status, _)| status != "ready")
+        );
+        assert!(vec_table_sql(&database).is_none());
+
+        let probe = RecordingProbe {
+            calls: Mutex::new(Vec::new()),
+        };
+        let config = ConfigStore::new(directory.path().join("config.json"));
+        config.restore_defaults().unwrap();
+        let secrets = SecretService::new("test", Arc::new(MemorySecretStore::default())).unwrap();
+        ProviderService::new(&config, &secrets, &NoopProviderProbe)
+            .save(ProviderSaveInput {
+                id: "openai".into(),
+                name: Some("OpenAI compatible".into()),
+                base_url: "https://embed.example.test/v1".into(),
+                api_key: Some("credential-value".into()),
+            })
+            .unwrap();
+        let embeddings = EmbeddingService::new(&config, &secrets, &probe);
+        embeddings
+            .save(EmbeddingConfigSaveInput {
+                id: "primary".into(),
+                provider_id: "openai".into(),
+                model_id: "embed-3".into(),
+                dimensions: 3,
+                normalized: true,
+            })
+            .unwrap();
+        embeddings.test("primary").unwrap();
+        embeddings.activate("primary").unwrap();
+        assert_eq!(probe.calls.lock().unwrap().len(), 1);
+        probe.calls.lock().unwrap().clear();
+
+        let indexed = service.index_library(&config, &secrets, &probe).unwrap();
+        assert_eq!(indexed.status, "vector_ready");
+        assert_eq!(indexed.indexed_chunks, 1);
+        assert_eq!(material_status(&database, &imported.id), "vector_ready");
+        let calls = probe.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "https://embed.example.test/v1");
+        assert_eq!(calls[0].1.as_deref(), Some("credential-value"));
+        assert!(calls[0].2.contains("订单服务"));
+    }
+
+    #[test]
+    fn index_library_without_active_embedding_fails_closed() {
+        use std::sync::Arc;
+
+        use crate::{
+            config::ConfigStore,
+            secrets::{MemorySecretStore, SecretService},
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let database = opened(&directory);
+        let service = MaterialService::new(&database, directory.path());
+        service
+            .import_file(write_import(
+                &directory,
+                "resume.md",
+                "负责订单服务与 Kafka 链路优化。",
+            ))
+            .unwrap();
+        let config = ConfigStore::new(directory.path().join("config.json"));
+        config.restore_defaults().unwrap();
+        let secrets = SecretService::new("test", Arc::new(MemorySecretStore::default())).unwrap();
+        assert_eq!(
+            service
+                .index_library(&config, &secrets, &Fake4dProbe)
+                .unwrap_err()
+                .code(),
+            "EMBEDDING_NOT_READY"
+        );
+        assert!(
+            chunk_embedding_rows(&database)
+                .iter()
+                .all(|(_, status, _)| status != "ready")
+        );
+        assert!(vec_table_sql(&database).is_none());
     }
 
     #[test]

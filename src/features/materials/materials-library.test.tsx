@@ -10,6 +10,7 @@ vi.mock("../../api/commands", () => ({
   importMaterial: vi.fn(),
   searchMaterials: vi.fn(),
   deleteMaterial: vi.fn(),
+  indexMaterials: vi.fn(),
 }));
 
 function material(overrides: Partial<MaterialSummary> = {}): MaterialSummary {
@@ -72,6 +73,26 @@ describe("MaterialsLibrary", () => {
     expect(container.textContent).toContain("3");
     expect(container.innerHTML).not.toContain("FULL_EXTRACTED_TEXT");
     expect(container.innerHTML).not.toMatch(/password|apiKey|apiSecret|credential/i);
+  });
+
+  it("rebuilds the vector index only when the user clicks 重建索引", async () => {
+    const imported = material({ status: "text_ready" });
+    const indexed = material({ status: "vector_ready" });
+    vi.mocked(commands.listMaterials)
+      .mockResolvedValueOnce({ ok: true, data: [imported] })
+      .mockResolvedValue({ ok: true, data: [indexed] });
+    vi.mocked(commands.indexMaterials).mockResolvedValue({
+      ok: true,
+      data: { indexedChunks: 3, status: "vector_ready" },
+    });
+
+    render(<MaterialsLibrary />);
+    expect(await screen.findByText("resume.md")).toBeTruthy();
+    expect(commands.indexMaterials).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "重建索引" }));
+    await waitFor(() => expect(commands.indexMaterials).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("vector_ready")).toBeTruthy();
+    expect(commands.importMaterial).not.toHaveBeenCalled();
   });
 
   it("imports from a path text field", async () => {

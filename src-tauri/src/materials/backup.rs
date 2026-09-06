@@ -18,8 +18,15 @@ const ARCHIVE_MANIFEST: &str = "manifest.json";
 const ARCHIVE_CONFIG: &str = "config.json";
 const ARCHIVE_SQLITE: &str = "app.sqlite";
 const ARCHIVE_MATERIALS: &str = "materials";
+const RESTORE_ROLLBACK: &str = ".restore-rollback";
+const RESTORE_JOURNAL: &str = ".restore-journal.json";
 const BACKUP_PAGES: i32 = 100;
 const BACKUP_PAUSE: Duration = Duration::from_millis(100);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestoreFault {
+    AfterDatabase,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackupError {
@@ -94,7 +101,33 @@ impl<'a> BackupService<'a> {
     }
 
     pub fn restore(&self, archive_directory: impl AsRef<Path>) -> Result<(), BackupError> {
-        let staged = stage_archive(archive_directory.as_ref())?;
+        self.restore_inner(archive_directory.as_ref(), None)
+    }
+
+    #[cfg(test)]
+    fn restore_failing_after_database(
+        &self,
+        archive_directory: impl AsRef<Path>,
+    ) -> Result<(), BackupError> {
+        self.restore_inner(
+            archive_directory.as_ref(),
+            Some(RestoreFault::AfterDatabase),
+        )
+    }
+
+    pub fn recover_interrupted_restore(&self) -> Result<(), BackupError> {
+        if !self.data_directory.join(RESTORE_JOURNAL).exists() {
+            return Ok(());
+        }
+        self.rollback_live_from_snapshot()
+    }
+
+    fn restore_inner(
+        &self,
+        archive_directory: &Path,
+        fault: Option<RestoreFault>,
+    ) -> Result<(), BackupError> {
+        let staged = stage_archive(archive_directory)?;
         let staged_root = staged.as_path();
         let manifest = read_manifest(&staged_root.join(ARCHIVE_MANIFEST))?;
         verify_hashes(staged_root, &manifest)?;
@@ -110,19 +143,95 @@ impl<'a> BackupService<'a> {
             fs::remove_dir_all(&incoming_materials).map_err(|_| BackupError::Operation)?;
         }
         copy_directory(&staged_root.join(ARCHIVE_MATERIALS), &incoming_materials)?;
-        online_backup_into(self.database, &staged_root.join(ARCHIVE_SQLITE))?;
+        self.snapshot_live_for_restore()?;
+        write_restore_journal(self.data_directory, "database")?;
+        let committed = (|| {
+            online_backup_into(self.database, &staged_root.join(ARCHIVE_SQLITE))?;
+            if fault == Some(RestoreFault::AfterDatabase) {
+                return Err(BackupError::Operation);
+            }
+            write_restore_journal(self.data_directory, "materials")?;
+            replace_directory(
+                &self.data_directory.join(ARCHIVE_MATERIALS),
+                &incoming_materials,
+            )?;
+            write_restore_journal(self.data_directory, "config")?;
+            self.config_store
+                .update(|config| {
+                    *config = restored;
+                    Ok(())
+                })
+                .map_err(|_| BackupError::Operation)?;
+            write_restore_journal(self.data_directory, "done")?;
+            Ok(())
+        })();
+        if committed.is_err() {
+            let _ = fs::remove_dir_all(&incoming_materials);
+            self.rollback_live_from_snapshot()?;
+        } else {
+            clear_restore_journal(self.data_directory);
+        }
+        committed
+    }
+
+    fn snapshot_live_for_restore(&self) -> Result<(), BackupError> {
+        let rollback = self.data_directory.join(RESTORE_ROLLBACK);
+        if rollback.exists() {
+            fs::remove_dir_all(&rollback).map_err(|_| BackupError::Operation)?;
+        }
+        fs::create_dir_all(&rollback).map_err(|_| BackupError::Operation)?;
+        online_backup_to_path(self.database, &rollback.join("app.sqlite3"))?;
+        copy_directory(
+            &self.data_directory.join(ARCHIVE_MATERIALS),
+            &rollback.join(ARCHIVE_MATERIALS),
+        )?;
+        write_scrubbed_config(self.config_store, &rollback.join(ARCHIVE_CONFIG))?;
+        write_restore_journal(self.data_directory, "snapshotted")?;
+        Ok(())
+    }
+
+    fn rollback_live_from_snapshot(&self) -> Result<(), BackupError> {
+        let rollback = self.data_directory.join(RESTORE_ROLLBACK);
+        if !rollback.exists() {
+            clear_restore_journal(self.data_directory);
+            return Ok(());
+        }
+        online_backup_into(self.database, &rollback.join("app.sqlite3"))?;
+        let rollback_materials = rollback.join(ARCHIVE_MATERIALS);
+        let staged_materials = self.data_directory.join(".materials.restoring-rollback");
+        if staged_materials.exists() {
+            fs::remove_dir_all(&staged_materials).map_err(|_| BackupError::Operation)?;
+        }
+        copy_directory(&rollback_materials, &staged_materials)?;
         replace_directory(
             &self.data_directory.join(ARCHIVE_MATERIALS),
-            &incoming_materials,
+            &staged_materials,
         )?;
+        let restored = read_scrubbed_config(&rollback.join(ARCHIVE_CONFIG))?;
         self.config_store
             .update(|config| {
                 *config = restored;
                 Ok(())
             })
             .map_err(|_| BackupError::Operation)?;
+        let _ = fs::remove_dir_all(&rollback);
+        clear_restore_journal(self.data_directory);
         Ok(())
     }
+}
+
+fn write_restore_journal(data_directory: &Path, phase: &str) -> Result<(), BackupError> {
+    let payload = serde_json::json!({ "phase": phase });
+    fs::write(
+        data_directory.join(RESTORE_JOURNAL),
+        serde_json::to_vec(&payload).map_err(|_| BackupError::Operation)?,
+    )
+    .map_err(|_| BackupError::Operation)
+}
+
+fn clear_restore_journal(data_directory: &Path) {
+    let _ = fs::remove_file(data_directory.join(RESTORE_JOURNAL));
+    let _ = fs::remove_dir_all(data_directory.join(RESTORE_ROLLBACK));
 }
 
 pub(crate) fn require_integrity(database: &Database) -> Result<(), BackupError> {
@@ -797,5 +906,52 @@ mod tests {
         assert!(sql.contains("float[4]"), "{sql}");
         assert_eq!(live_searchable(&database, "订单服务"), 1);
         assert_eq!(live_searchable(&database, "本轮补充内容"), 0);
+    }
+
+    #[test]
+    fn restore_rolls_back_when_commit_fails_after_database() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = opened(&directory);
+        let config = seeded_config(&directory);
+        let materials = MaterialService::new(&database, directory.path());
+        materials
+            .import_file(write_import(&directory, "resume.md", IMPORT_BODY))
+            .unwrap();
+        let archive = directory.path().join("archive");
+        let backup = BackupService::new(&database, directory.path(), &config);
+        backup.create(&archive).unwrap();
+
+        materials
+            .import_file(write_import(
+                &directory,
+                "later.txt",
+                "本轮补充内容用于确认失败恢复不会留下混合状态。",
+            ))
+            .unwrap();
+        config
+            .update(|current| {
+                current.application.locale = Some("zh-CN-live".into());
+                Ok(())
+            })
+            .unwrap();
+        let before_config = std::fs::read_to_string(directory.path().join("config.json")).unwrap();
+        let before_files = material_files(directory.path());
+
+        assert_eq!(
+            backup
+                .restore_failing_after_database(&archive)
+                .unwrap_err()
+                .code(),
+            "BACKUP_OPERATION_FAILED"
+        );
+        assert_eq!(live_searchable(&database, "订单服务"), 1);
+        assert_eq!(live_searchable(&database, "本轮补充内容"), 1);
+        assert_eq!(material_files(directory.path()), before_files);
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("config.json")).unwrap(),
+            before_config
+        );
+        assert!(!directory.path().join(".restore-journal.json").exists());
+        assert!(!directory.path().join(".restore-rollback").exists());
     }
 }

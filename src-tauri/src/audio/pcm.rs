@@ -70,6 +70,36 @@ impl PcmRing {
     }
 }
 
+pub fn resample_pcm16_mono(pcm: &[u8], from_hz: u32, to_hz: u32) -> Vec<u8> {
+    let pcm = even_prefix(pcm);
+    if from_hz == 0 || to_hz == 0 || from_hz == to_hz || pcm.len() < BYTES_PER_SAMPLE {
+        return pcm.to_vec();
+    }
+    let samples: Vec<i16> = pcm
+        .chunks_exact(BYTES_PER_SAMPLE)
+        .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+        .collect();
+    let out_len = ((samples.len() as u64) * u64::from(to_hz) / u64::from(from_hz)) as usize;
+    if out_len == 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(out_len * BYTES_PER_SAMPLE);
+    let last = samples.len() - 1;
+    for index in 0..out_len {
+        let src = if out_len == 1 {
+            0.0
+        } else {
+            index as f64 * last as f64 / (out_len - 1) as f64
+        };
+        let left = src.floor() as usize;
+        let right = left.min(last).saturating_add(1).min(last);
+        let frac = src - left as f64;
+        let sample = samples[left] as f64 + (samples[right] as f64 - samples[left] as f64) * frac;
+        out.extend_from_slice(&(sample.round() as i16).to_le_bytes());
+    }
+    out
+}
+
 /// Average each group of 3 little-endian i16 samples into one (48 kHz → 16 kHz).
 pub fn downsample_48k_to_16k(pcm48: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
@@ -97,7 +127,7 @@ fn even_prefix(pcm: &[u8]) -> &[u8] {
 
 #[cfg(test)]
 mod tests {
-    use super::{PcmRing, RING_CAPACITY_BYTES, downsample_48k_to_16k};
+    use super::{PcmRing, RING_CAPACITY_BYTES, downsample_48k_to_16k, resample_pcm16_mono};
 
     fn le_i16(samples: &[i16]) -> Vec<u8> {
         samples
@@ -141,5 +171,15 @@ mod tests {
     fn downsample_averages_each_three_samples() {
         let pcm = le_i16(&[300, 600, 900, -3, -6, -9]);
         assert_eq!(downsample_48k_to_16k(&pcm), le_i16(&[600, -6]));
+    }
+
+    #[test]
+    fn resample_pcm16_mono_keeps_same_rate_and_upsamples_16k_to_24k() {
+        let pcm = le_i16(&[0, 3000]);
+        assert_eq!(resample_pcm16_mono(&pcm, 16_000, 16_000), pcm);
+        let up = resample_pcm16_mono(&pcm, 16_000, 24_000);
+        assert_eq!(up.len(), 6);
+        assert_eq!(&up[..2], &[0, 0]);
+        assert_eq!(&up[4..], &3000_i16.to_le_bytes());
     }
 }

@@ -8,11 +8,23 @@ pub const MEDIA_PDF: &str = "application/pdf";
 pub const MEDIA_DOCX: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParseBudget {
+    pub max_text_chars: usize,
+    pub max_ms: u64,
+}
+
+pub const DEFAULT_PARSE_BUDGET: ParseBudget = ParseBudget {
+    max_text_chars: 200_000,
+    max_ms: 8_000,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseError {
     NotUtf8,
     NoTextLayer,
     ParseFailed,
+    BudgetExceeded,
 }
 
 pub fn parser_version(media_kind: &str) -> &'static str {
@@ -24,6 +36,20 @@ pub fn parser_version(media_kind: &str) -> &'static str {
 }
 
 pub fn extract_text(media_kind: &str, bytes: &[u8]) -> Result<String, ParseError> {
+    extract_text_with_budget(media_kind, bytes, DEFAULT_PARSE_BUDGET)
+}
+
+pub fn extract_text_with_budget(
+    media_kind: &str,
+    bytes: &[u8],
+    budget: ParseBudget,
+) -> Result<String, ParseError> {
+    let media_kind = media_kind.to_owned();
+    let bytes = bytes.to_vec();
+    run_with_budget(budget, move || extract_text_unbounded(&media_kind, &bytes))
+}
+
+fn extract_text_unbounded(media_kind: &str, bytes: &[u8]) -> Result<String, ParseError> {
     match media_kind {
         MEDIA_PLAIN | MEDIA_MARKDOWN => std::str::from_utf8(bytes)
             .map(str::to_owned)
@@ -32,6 +58,34 @@ pub fn extract_text(media_kind: &str, bytes: &[u8]) -> Result<String, ParseError
         MEDIA_DOCX => extract_docx(bytes),
         _ => Err(ParseError::ParseFailed),
     }
+}
+
+fn run_with_budget(
+    budget: ParseBudget,
+    work: impl FnOnce() -> Result<String, ParseError> + Send + 'static,
+) -> Result<String, ParseError> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("material-parse".into())
+        .spawn(move || {
+            let _ = tx.send(work());
+        })
+        .map_err(|_| ParseError::ParseFailed)?;
+    match rx.recv_timeout(std::time::Duration::from_millis(budget.max_ms)) {
+        Ok(Ok(text)) if text.chars().count() > budget.max_text_chars => {
+            Err(ParseError::BudgetExceeded)
+        }
+        Ok(result) => result,
+        Err(_) => Err(ParseError::BudgetExceeded),
+    }
+}
+
+#[cfg(test)]
+fn extract_with_parser(
+    budget: ParseBudget,
+    parser: impl FnOnce() -> Result<String, ParseError> + Send + 'static,
+) -> Result<String, ParseError> {
+    run_with_budget(budget, parser)
 }
 
 fn extract_pdf(bytes: &[u8]) -> Result<String, ParseError> {
@@ -139,8 +193,8 @@ fn append_sdt_text(text: &mut String, tag: &docx_rs::StructuredDataTag) {
 #[cfg(test)]
 mod tests {
     use super::{
-        MEDIA_DOCX, MEDIA_MARKDOWN, MEDIA_PDF, MEDIA_PLAIN, ParseError, extract_text,
-        parser_version,
+        MEDIA_DOCX, MEDIA_MARKDOWN, MEDIA_PDF, MEDIA_PLAIN, ParseBudget, ParseError, extract_text,
+        extract_text_with_budget, extract_with_parser, parser_version,
     };
     use std::path::PathBuf;
 
@@ -268,6 +322,51 @@ mod tests {
         assert_eq!(
             extract_text(MEDIA_DOCX, &fixture("empty-text.docx")).unwrap_err(),
             ParseError::ParseFailed
+        );
+    }
+
+    #[test]
+    fn extract_text_rejects_when_text_budget_is_exceeded() {
+        let body = "负责订单服务与 Kafka 链路优化。".repeat(8);
+        assert!(body.chars().count() > 8);
+        assert_eq!(
+            extract_text_with_budget(
+                MEDIA_PLAIN,
+                body.as_bytes(),
+                ParseBudget {
+                    max_text_chars: 8,
+                    max_ms: 5_000,
+                },
+            )
+            .unwrap_err(),
+            ParseError::BudgetExceeded
+        );
+        assert!(
+            extract_text(MEDIA_PLAIN, body.as_bytes())
+                .unwrap()
+                .contains("订单服务")
+        );
+    }
+
+    #[test]
+    fn extract_text_stops_waiting_when_time_budget_elapses() {
+        let started = std::time::Instant::now();
+        let error = extract_with_parser(
+            ParseBudget {
+                max_text_chars: 1_000,
+                max_ms: 40,
+            },
+            || {
+                std::thread::sleep(std::time::Duration::from_millis(800));
+                Ok("slow-parse".into())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error, ParseError::BudgetExceeded);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(400),
+            "caller must return after the join timeout, got {:?}",
+            started.elapsed()
         );
     }
 }

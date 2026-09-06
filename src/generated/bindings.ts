@@ -12,6 +12,8 @@ export type StartupState = { "kind": "ready" } | { "kind": "migrated" } | { "kin
 
 export type LegacyMigrationStatus = { applied: boolean, reenterSecrets: boolean, omitted: Array<string>, };
 
+export type LegacySessionImport = { sessions: number, turns: number, };
+
 export type SecretSlot = { reference: string, configured: boolean, };
 
 export type ApplicationConfig = { locale: string | null, };
@@ -71,6 +73,8 @@ export type LiveKitTestResult = { ready: boolean, };
 export type LiveKitJoinToken = { url: string, token: string, room: string, identity: string, expiresInSec: number, };
 
 export type MaterialSummary = { id: string, fileName: string, contentSha256: string, mediaType: string, byteSize: number, status: string, chunkCount: number, };
+
+export type MaterialIndexResult = { indexedChunks: number, status: string, };
 
 export type MaterialSearchHit = { materialId: string, chunkId: string, fileName: string, section: string, snippet: string, rank: number, };
 

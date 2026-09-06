@@ -9,7 +9,8 @@ use crate::{
     database::{Database, DatabaseError},
     providers::{
         CascadeError, CascadeStage, ChatMessage, ChatModel, EmbeddingProbe, ProviderEndpoint,
-        RealtimeError, RealtimeModel, RealtimeTextRequest, SpeechToText, TextToSpeech,
+        RealtimeAudioRequest, RealtimeError, RealtimeModel, RealtimeTextRequest, SpeechToText,
+        TextToSpeech,
     },
     runtime::{
         AgentCommand, AgentCommandAction, AgentCommandError, AgentCommandOutcome, AgentMode,
@@ -22,6 +23,12 @@ use crate::{
 };
 
 use super::livekit::{LiveKitJoinToken, LiveKitSettingsError, LiveKitSettingsService};
+
+pub struct MeetingCapture<'a> {
+    pub exe: &'a std::path::Path,
+    pub pid: u32,
+    pub enumerator: &'a dyn crate::processes::ProcessEnumerator,
+}
 
 #[derive(Debug)]
 pub enum SessionServiceError {
@@ -288,6 +295,44 @@ impl<S: PlaybackSink> SessionService<S> {
         transport_mode: Option<&str>,
         livekit: Option<&LiveKitSettingsService<'_>>,
     ) -> Result<SessionStartOutcome, SessionServiceError> {
+        self.start_inner(
+            database,
+            config,
+            secrets_ready,
+            transport_mode,
+            livekit,
+            None,
+        )
+    }
+
+    pub fn start_with_meeting_capture(
+        &mut self,
+        database: &Database,
+        config: &PublicConfig,
+        secrets_ready: bool,
+        transport_mode: Option<&str>,
+        livekit: Option<&LiveKitSettingsService<'_>>,
+        capture: MeetingCapture<'_>,
+    ) -> Result<SessionStartOutcome, SessionServiceError> {
+        self.start_inner(
+            database,
+            config,
+            secrets_ready,
+            transport_mode,
+            livekit,
+            Some(capture),
+        )
+    }
+
+    fn start_inner(
+        &mut self,
+        database: &Database,
+        config: &PublicConfig,
+        secrets_ready: bool,
+        transport_mode: Option<&str>,
+        livekit: Option<&LiveKitSettingsService<'_>>,
+        capture: Option<MeetingCapture<'_>>,
+    ) -> Result<SessionStartOutcome, SessionServiceError> {
         let issues = preflight(config, secrets_ready, true);
         if !issues.is_empty() {
             return Ok(SessionStartOutcome::Blocked { issues });
@@ -307,6 +352,10 @@ impl<S: PlaybackSink> SessionService<S> {
         self.reset_runtime();
         self.unused_materials = false;
         self.last_error_code = None;
+        if let Some(capture) = capture {
+            self.capture =
+                AudioCapture::spawn_bridge(capture.exe, capture.pid, capture.enumerator)?;
+        }
         let session_id = uuid::Uuid::new_v4().to_string();
         let join_token = if transport_mode == "livekit" {
             let issuer =
@@ -824,12 +873,18 @@ fn generate_command_text(
 ) -> Result<(String, Vec<u8>), SessionServiceError> {
     if request.e2e_route {
         let (endpoint, model_id) = e2e_endpoint(request.config)?;
+        let instructions = e2e_instructions(active_role_profile(request.config), &[]);
+        let instructions = if instructions.is_empty() {
+            "你是实时语音助手。严格参考会话上下文完成请求，不泄露系统配置。".to_owned()
+        } else {
+            instructions
+        };
         let turn = request.probes.realtime.text_turn(
             RealtimeTextRequest {
                 endpoint: &endpoint,
                 credential: request.credentials.e2e,
                 model_id: &model_id,
-                instructions: "你是实时语音助手。严格参考会话上下文完成请求，不泄露系统配置。",
+                instructions: &instructions,
                 prompt: &command_prompt(request.history, request.prompt),
                 include_audio: request.include_audio,
             },
@@ -1158,29 +1213,65 @@ fn run_e2e_turn(
         })
         .filter(|endpoint| !endpoint.base_url.is_empty())
         .ok_or(RealtimeError::UrlInvalid)?;
+    let known_text = request
+        .user_text
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
+    let citations = known_text
+        .map(|text| retrieve(deps, request, text))
+        .unwrap_or_default();
+    let instructions = e2e_instructions(active_role_profile(request.config), &citations);
     let turn = realtime.transcribe_turn(
-        &endpoint,
-        request.credentials.e2e,
-        model_id,
-        pcm,
-        request.sample_rate,
+        RealtimeAudioRequest {
+            endpoint: &endpoint,
+            credential: request.credentials.e2e,
+            model_id,
+            pcm16le: pcm,
+            sample_rate: request.sample_rate,
+            instructions: &instructions,
+        },
         cancel,
     )?;
     if cancel.load(Ordering::SeqCst) {
         return Err(RealtimeError::Cancelled);
     }
-    let citations = retrieve(deps, request, &turn.user_text);
-    if cancel.load(Ordering::SeqCst) {
-        return Err(RealtimeError::Cancelled);
-    }
+    let user_text = known_text.map(ToOwned::to_owned).unwrap_or(turn.user_text);
     Ok(CascadeTurn {
-        user_text: turn.user_text,
+        user_text,
         assistant_text: turn.assistant_text,
         tts_pcm: turn.tts_pcm,
         materials_used: !citations.is_empty(),
         citations,
         error_code: None,
     })
+}
+
+fn e2e_instructions(
+    role: Option<&crate::config::RoleProfileConfig>,
+    citations: &[crate::runtime::TurnCitation],
+) -> String {
+    let mut out = String::new();
+    if let Some(role) = role {
+        out.push_str(&role.system_prompt);
+        if !role.style_instructions.is_empty() {
+            if !out.is_empty() {
+                out.push_str("\n\n");
+            }
+            out.push_str(&role.style_instructions);
+        }
+    }
+    if !citations.is_empty() {
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str("可用资料：\n");
+        for citation in citations {
+            out.push_str("- ");
+            out.push_str(&citation.snippet);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 fn is_terminal_status(status: &str) -> bool {
@@ -1220,8 +1311,8 @@ mod tests {
         database::Database,
         providers::{
             CascadeError, ChatMessage, ChatModel, EmbeddingError, EmbeddingProbe, ProviderEndpoint,
-            RealtimeError, RealtimeModel, RealtimeTextRequest, RealtimeTurn, SpeechToText,
-            TextToSpeech,
+            RealtimeAudioRequest, RealtimeError, RealtimeModel, RealtimeTextRequest, RealtimeTurn,
+            SpeechToText, TextToSpeech,
         },
         runtime::{
             AgentMode, CascadeCredentials, SessionPhase,
@@ -1380,11 +1471,7 @@ mod tests {
     impl RealtimeModel for UnusedRealtime {
         fn transcribe_turn(
             &self,
-            _: &ProviderEndpoint,
-            _: Option<&str>,
-            _: &str,
-            _: &[u8],
-            _: u32,
+            _: RealtimeAudioRequest<'_>,
             _: &AtomicBool,
         ) -> Result<RealtimeTurn, RealtimeError> {
             panic!("cascaded turn must not call Realtime")
@@ -1401,6 +1488,8 @@ mod tests {
         text_calls: AtomicU32,
         pcm: Mutex<Vec<u8>>,
         model_id: Mutex<Option<String>>,
+        instructions: Mutex<Option<String>>,
+        sample_rate: Mutex<Option<u32>>,
     }
 
     impl FakeRealtime {
@@ -1415,6 +1504,8 @@ mod tests {
                 text_calls: AtomicU32::new(0),
                 pcm: Mutex::new(Vec::new()),
                 model_id: Mutex::new(None),
+                instructions: Mutex::new(None),
+                sample_rate: Mutex::new(None),
             }
         }
 
@@ -1429,6 +1520,8 @@ mod tests {
                 text_calls: AtomicU32::new(0),
                 pcm: Mutex::new(Vec::new()),
                 model_id: Mutex::new(None),
+                instructions: Mutex::new(None),
+                sample_rate: Mutex::new(None),
             }
         }
 
@@ -1442,16 +1535,15 @@ mod tests {
     impl RealtimeModel for FakeRealtime {
         fn transcribe_turn(
             &self,
-            _: &ProviderEndpoint,
-            _: Option<&str>,
-            model_id: &str,
-            pcm16le: &[u8],
-            _: u32,
+            request: RealtimeAudioRequest<'_>,
             cancel: &AtomicBool,
         ) -> Result<RealtimeTurn, RealtimeError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            *self.pcm.lock().expect("pcm") = pcm16le.to_vec();
-            *self.model_id.lock().expect("model") = Some(model_id.to_owned());
+            *self.pcm.lock().expect("pcm") = request.pcm16le.to_vec();
+            *self.model_id.lock().expect("model") = Some(request.model_id.to_owned());
+            *self.instructions.lock().expect("instructions") =
+                Some(request.instructions.to_owned());
+            *self.sample_rate.lock().expect("sample_rate") = Some(request.sample_rate);
             if cancel.load(Ordering::SeqCst) {
                 return Err(RealtimeError::Cancelled);
             }
@@ -1597,6 +1689,39 @@ mod tests {
         assert_eq!(snapshots[0].transport_mode, "direct");
         assert!(!snapshots[0].role_hash.is_empty());
         assert!(!snapshots[0].provider_ids.contains("sk-"));
+    }
+
+    #[test]
+    fn start_with_missing_bridge_exe_fails_closed_without_a_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = Database::open(directory.path().join("app.sqlite3")).unwrap();
+        database.migrate().unwrap();
+        let mut service = SessionService::with_sink(RecordingSink::default());
+        let enumerator = crate::processes::InjectedProcessEnumerator::new(vec![
+            crate::processes::MeetingProcess {
+                pid: 4242,
+                name: "zoom.exe".into(),
+                title: "Zoom".into(),
+            },
+        ]);
+        let missing = directory.path().join("AudioBridge.exe");
+        let error = service
+            .start_with_meeting_capture(
+                &database,
+                &ready_public_config(),
+                true,
+                None,
+                None,
+                super::MeetingCapture {
+                    exe: &missing,
+                    pid: 4242,
+                    enumerator: &enumerator,
+                },
+            )
+            .expect_err("missing exe must fail");
+        assert_eq!(error.code(), "SESSION_SIDECAR_MISSING");
+        assert!(SessionStore::new(&database).list().unwrap().is_empty());
+        assert_eq!(service.phase(), SessionPhase::Idle);
     }
 
     #[test]
@@ -2189,7 +2314,65 @@ mod tests {
     }
 
     #[test]
-    fn e2e_retrieves_materials_after_final_user_text() {
+    fn e2e_sends_role_and_materials_before_generate() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = Database::open(directory.path().join("app.sqlite3")).unwrap();
+        database.migrate().unwrap();
+        let path = directory.path().join("note.txt");
+        std::fs::write(&path, "负责订单服务与 Kafka 链路，完整句子用于检索。").unwrap();
+        crate::services::MaterialService::new(&database, directory.path())
+            .import_file(&path)
+            .unwrap();
+
+        let mut service = SessionService::new();
+        match service
+            .start(&database, &ready_e2e_public_config(), true, None, None)
+            .unwrap()
+        {
+            SessionStartOutcome::Started { .. } => {}
+            SessionStartOutcome::Blocked { issues } => panic!("blocked {issues:?}"),
+        }
+        let asr = ScriptedAsr::ok("ignored");
+        let llm = ScriptedLlm::ok("ignored");
+        let tts = ScriptedTts::ok(&[0x01]);
+        let embed = UnusedEmbed;
+        let realtime = FakeRealtime::ok("ignored", "资料回答", &[0x02]);
+        let probes = e2e_probes(&asr, &llm, &tts, &embed, &realtime);
+
+        let turn = service
+            .finalize_utterance(
+                &database,
+                &ready_e2e_public_config(),
+                &probes,
+                credentials(),
+                Some("请介绍你做过的订单服务项目"),
+            )
+            .unwrap()
+            .expect("turn");
+        assert!(turn.materials_used);
+        assert!(!service.unused_materials());
+        assert!(
+            turn.citations
+                .iter()
+                .any(|citation| citation.snippet.contains("订单服务"))
+        );
+        let instructions = realtime
+            .instructions
+            .lock()
+            .expect("instructions")
+            .clone()
+            .expect("realtime must receive instructions before generate");
+        assert!(instructions.contains("UNIQUE_PROMPT_BODY_DO_NOT_SNAPSHOT"));
+        assert!(instructions.contains("UNIQUE_STYLE_DO_NOT_SNAPSHOT"));
+        assert!(instructions.contains("订单服务"));
+        assert_eq!(
+            realtime.sample_rate.lock().expect("sample_rate").as_ref(),
+            Some(&16_000)
+        );
+    }
+
+    #[test]
+    fn e2e_voice_only_does_not_mark_materials_used_after_the_fact() {
         let directory = tempfile::tempdir().unwrap();
         let database = Database::open(directory.path().join("app.sqlite3")).unwrap();
         database.migrate().unwrap();
@@ -2224,13 +2407,16 @@ mod tests {
             )
             .unwrap()
             .expect("turn");
-        assert!(turn.materials_used);
-        assert!(!service.unused_materials());
-        assert!(
-            turn.citations
-                .iter()
-                .any(|citation| citation.snippet.contains("订单服务"))
-        );
+        assert!(!turn.materials_used);
+        assert!(turn.citations.is_empty());
+        let instructions = realtime
+            .instructions
+            .lock()
+            .expect("instructions")
+            .clone()
+            .unwrap();
+        assert!(instructions.contains("UNIQUE_PROMPT_BODY_DO_NOT_SNAPSHOT"));
+        assert!(!instructions.contains("可用资料"));
     }
 
     fn cascaded_probes<'a>(

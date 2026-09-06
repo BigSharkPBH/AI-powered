@@ -154,6 +154,35 @@ pub(crate) fn room_join_token(
     Ok(Zeroizing::new(jwt))
 }
 
+pub fn livekit_connect_src(raw: &str) -> Result<Vec<String>, LiveKitError> {
+    let parsed = Url::parse(raw.trim()).map_err(|_| LiveKitError::EndpointInvalid)?;
+    if parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(LiveKitError::EndpointInvalid);
+    }
+    let (ws_scheme, http_scheme) = match parsed.scheme() {
+        "ws" | "http" => ("ws", "http"),
+        "wss" | "https" => ("wss", "https"),
+        _ => return Err(LiveKitError::EndpointInvalid),
+    };
+    let host = parsed.host_str().ok_or(LiveKitError::EndpointInvalid)?;
+    if host == "*" {
+        return Err(LiveKitError::EndpointInvalid);
+    }
+    let port = parsed
+        .port()
+        .map(|port| format!(":{port}"))
+        .unwrap_or_default();
+    Ok(vec![
+        format!("{ws_scheme}://{host}{port}"),
+        format!("{http_scheme}://{host}{port}"),
+    ])
+}
+
 pub(crate) fn control_url(raw: &str) -> Result<Url, LiveKitError> {
     let parsed = Url::parse(raw).map_err(|_| LiveKitError::EndpointInvalid)?;
     if parsed.host_str().is_none()
@@ -190,4 +219,25 @@ fn parse_list_rooms(bytes: &[u8]) -> Result<(), LiveKitError> {
     let _: ListRoomsResponse =
         serde_json::from_slice(bytes).map_err(|_| LiveKitError::ResponseInvalid)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::livekit_connect_src;
+
+    #[test]
+    fn connect_src_is_host_scoped_and_never_scheme_only() {
+        let allowed = livekit_connect_src("wss://livekit.example.test").unwrap();
+        assert_eq!(
+            allowed,
+            vec![
+                "wss://livekit.example.test".to_owned(),
+                "https://livekit.example.test".to_owned()
+            ]
+        );
+        assert!(allowed.iter().all(|entry| !entry.ends_with("://")
+            && !matches!(entry.as_str(), "https:" | "http:" | "wss:" | "ws:" | "*")));
+        assert!(livekit_connect_src("https://").is_err());
+        assert!(livekit_connect_src("*").is_err());
+    }
 }

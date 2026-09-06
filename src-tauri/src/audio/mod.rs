@@ -7,4 +7,5 @@ pub use capture::{
 };
 pub use pcm::{
     ASR_SAMPLE_RATE, CAPTURE_SAMPLE_RATE, PcmRing, RING_CAPACITY_BYTES, downsample_48k_to_16k,
+    resample_pcm16_mono,
 };

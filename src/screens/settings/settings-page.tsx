@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { getLegacyMigrationStatus } from "../../api/commands";
+import { LegacyImportPanel } from "../../features/migrate/legacy-import";
 import { ReenterSecretsBanner } from "../../features/migrate/reenter-secrets-banner";
 import { RoleEditor } from "../../features/roles/role-editor";
 import type { LegacyMigrationStatus } from "../../generated/bindings";
@@ -23,6 +24,7 @@ export function SettingsPage() {
     <>
       <PageShell id="settings" />
       <ReenterSecretsBanner status={migration} />
+      <LegacyImportPanel />
       <RoleEditor />
     </>
   );

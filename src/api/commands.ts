@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-import type { AgentCommandInput, AgentCommandResult, CommandResult, DiagnosticsExportResult, EmbeddingConfig, EmbeddingConfigSaveInput, EmbeddingTestResult, FoundationStatus, LegacyMigrationStatus, LiveKitConfig, LiveKitJoinToken, LiveKitSettingsSaveInput, LiveKitTestResult, MaterialSearchHit, MaterialSummary, ModelDiscoveryResult, ProviderConfig, ProviderSaveInput, ProviderTestResult, PublicConfig, RoleProfileConfig, RoleProfileCopyInput, RoleProfileSaveInput, RuntimeStatus, SessionDetail, SessionExportResult, SessionStartResult, SessionSummary, SessionTurnView, StartupState, VoiceRouteConfig, VoiceRouteSaveInput, VoiceRouteTestResult } from "../generated/bindings";
+import type { AgentCommandInput, AgentCommandResult, CommandResult, DiagnosticsExportResult, EmbeddingConfig, EmbeddingConfigSaveInput, EmbeddingTestResult, FoundationStatus, LegacyMigrationStatus, LegacySessionImport, LiveKitConfig, LiveKitJoinToken, LiveKitSettingsSaveInput, LiveKitTestResult, MaterialIndexResult, MaterialSearchHit, MaterialSummary, ModelDiscoveryResult, ProviderConfig, ProviderSaveInput, ProviderTestResult, PublicConfig, RoleProfileConfig, RoleProfileCopyInput, RoleProfileSaveInput, RuntimeStatus, SessionDetail, SessionExportResult, SessionStartResult, SessionSummary, SessionTurnView, StartupState, VoiceRouteConfig, VoiceRouteSaveInput, VoiceRouteTestResult } from "../generated/bindings";
 
 export function getFoundationStatus() {
   return invoke<CommandResult<FoundationStatus>>("foundation_get_status");
@@ -16,6 +16,10 @@ export function getStartupState() {
 
 export function getLegacyMigrationStatus() {
   return invoke<CommandResult<LegacyMigrationStatus>>("legacy_migration_status");
+}
+
+export function importLegacySource(path: string) {
+  return invoke<CommandResult<LegacySessionImport>>("legacy_import_source", { path });
 }
 
 export function getConfigPublic() {
@@ -132,6 +136,10 @@ export function searchMaterials(query: string, topK?: number) {
 
 export function deleteMaterial(id: string) {
   return invoke<CommandResult<FoundationStatus>>("material_delete", { id });
+}
+
+export function indexMaterials() {
+  return invoke<CommandResult<MaterialIndexResult>>("material_index");
 }
 
 export function startSession(transportMode?: "direct" | "livekit") {

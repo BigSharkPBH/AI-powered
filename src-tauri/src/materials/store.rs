@@ -215,8 +215,11 @@ impl<'a> MaterialStore<'a> {
             return Ok(Vec::new());
         }
         let top_k = top_k.clamp(1, MAX_TOP_K);
+        if let Some(inner) = exact_quoted_inner(query) {
+            return self.search_like(inner, top_k);
+        }
         if query.chars().count() >= 3 {
-            self.search_match(&fts_phrase(query), top_k)
+            self.search_match(&fts_match_query(query), top_k)
         } else {
             self.search_like(query, top_k)
         }
@@ -317,9 +320,136 @@ fn map_material_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<MaterialReco
     })
 }
 
+fn exact_quoted_inner(query: &str) -> Option<&str> {
+    let query = query.trim();
+    let inner = query.strip_prefix('"')?.strip_suffix('"')?;
+    if inner.is_empty() || inner.contains('"') {
+        return None;
+    }
+    Some(inner)
+}
+
+fn fts_match_query(query: &str) -> String {
+    let tokens = extract_search_tokens(query);
+    if tokens.is_empty() {
+        return fts_phrase(query);
+    }
+    tokens
+        .iter()
+        .map(|token| fts_phrase(token))
+        .collect::<Vec<_>>()
+        .join(" AND ")
+}
+
 fn fts_phrase(query: &str) -> String {
     format!("\"{}\"", query.replace('"', "\"\""))
 }
+
+fn extract_search_tokens(query: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut current_cjk = false;
+
+    for ch in query.chars() {
+        if is_cjk(ch) {
+            if !current.is_empty() && !current_cjk {
+                push_ascii_token(&current, &mut tokens);
+                current.clear();
+            }
+            current.push(ch);
+            current_cjk = true;
+        } else if ch.is_ascii_alphanumeric() {
+            if !current.is_empty() && current_cjk {
+                push_cjk_tokens(&current, &mut tokens);
+                current.clear();
+            }
+            current.push(ch);
+            current_cjk = false;
+        } else if !current.is_empty() {
+            if current_cjk {
+                push_cjk_tokens(&current, &mut tokens);
+            } else {
+                push_ascii_token(&current, &mut tokens);
+            }
+            current.clear();
+        }
+    }
+    if !current.is_empty() {
+        if current_cjk {
+            push_cjk_tokens(&current, &mut tokens);
+        } else {
+            push_ascii_token(&current, &mut tokens);
+        }
+    }
+    tokens
+}
+
+fn push_ascii_token(token: &str, tokens: &mut Vec<String>) {
+    if token.chars().count() < 2 {
+        return;
+    }
+    if FTS_OPERATORS
+        .iter()
+        .any(|operator| token.eq_ignore_ascii_case(operator))
+    {
+        return;
+    }
+    tokens.push(token.to_string());
+}
+
+fn push_cjk_tokens(block: &str, tokens: &mut Vec<String>) {
+    let mut text = block.to_string();
+    for stopword in CJK_STOPWORDS {
+        text = text.replace(stopword, "\u{1e}");
+    }
+    for part in text.split('\u{1e}') {
+        if part.chars().count() >= 2 {
+            tokens.push(part.to_string());
+        }
+    }
+}
+
+fn is_cjk(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{4E00}'..='\u{9FFF}' | '\u{3400}'..='\u{4DBF}' | '\u{F900}'..='\u{FAFF}'
+    )
+}
+
+const CJK_STOPWORDS: &[&str] = &[
+    "有没有",
+    "做过的",
+    "请介绍",
+    "介绍",
+    "做过",
+    "什么",
+    "哪些",
+    "怎么",
+    "如何",
+    "是否",
+    "一下",
+    "项目",
+    "请",
+    "你",
+    "您",
+    "我",
+    "的",
+    "了",
+    "吗",
+    "呢",
+    "吧",
+    "啊",
+    "是",
+    "在",
+    "和",
+    "与",
+    "及",
+    "等",
+    "做",
+    "过",
+];
+
+const FTS_OPERATORS: &[&str] = &["AND", "OR", "NOT", "NEAR"];
 
 fn map_search_hit(row: &rusqlite::Row<'_>) -> rusqlite::Result<MaterialSearchHit> {
     let content: String = row.get(4)?;
@@ -352,4 +482,33 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(bytes);
     format!("{digest:x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{exact_quoted_inner, extract_search_tokens, fts_match_query};
+
+    #[test]
+    fn extracts_keywords_from_natural_chinese_questions() {
+        assert_eq!(
+            extract_search_tokens("请介绍你做过的订单服务项目"),
+            vec!["订单服务".to_string()]
+        );
+        assert_eq!(
+            extract_search_tokens("订单服务 Kafka"),
+            vec!["订单服务".to_string(), "Kafka".to_string()]
+        );
+        assert_eq!(
+            extract_search_tokens("订单服务"),
+            vec!["订单服务".to_string()]
+        );
+        assert_eq!(
+            fts_match_query("订单服务 Kafka"),
+            "\"订单服务\" AND \"Kafka\""
+        );
+        assert_eq!(
+            exact_quoted_inner("\"请介绍你做过的订单服务项目\""),
+            Some("请介绍你做过的订单服务项目")
+        );
+    }
 }

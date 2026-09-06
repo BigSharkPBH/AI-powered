@@ -14,7 +14,8 @@ pub use livekit::{
     LiveKitTestResult,
 };
 pub use materials::{
-    EmbeddingSpace, MaterialSearchHit, MaterialService, MaterialServiceError, MaterialSummary,
+    EmbeddingSpace, MaterialIndexResult, MaterialSearchHit, MaterialService, MaterialServiceError,
+    MaterialSummary,
 };
 pub use providers::{
     DiscoveredModelDto, ModelDiscoveryResult, ProviderSaveInput, ProviderService,

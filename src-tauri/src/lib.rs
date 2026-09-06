@@ -18,6 +18,7 @@ pub mod runtime;
 pub mod secrets;
 pub mod services;
 pub mod sessions;
+pub mod startup;
 
 fn navigation_is_allowed(url: &tauri::Url) -> bool {
     if url.scheme() == "tauri" {
@@ -40,18 +41,49 @@ fn navigation_is_allowed(url: &tauri::Url) -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+    let arguments = std::env::args_os().collect::<Vec<_>>();
+    if startup::is_isolation_support_check(&arguments) {
+        print!("{}", startup::ISOLATION_SUPPORT_MARKER);
+        return;
+    }
+    let isolated = match startup::parse_isolated_startup(
+        &arguments,
+        std::env::var_os("AI_VIRTUAL_ASSISTANT_CONFIG").as_deref(),
+    ) {
+        Ok(isolated) => isolated,
+        Err(error) => {
+            eprintln!("isolated startup rejected: {error}");
+            std::process::exit(2);
+        }
+    };
+    if let Some(isolated) = isolated.as_ref()
+        && let Err(error) = startup::validate_isolated_webview_environment(
+            isolated,
+            &std::env::vars_os().collect::<Vec<_>>(),
+        )
+    {
+        eprintln!("isolated startup rejected: {error}");
+        std::process::exit(2);
+    }
+
+    let builder = tauri::Builder::default();
+    let builder = if isolated.is_none() {
+        builder.plugin(tauri_plugin_single_instance::init(|app, _, _| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
                 let _ = window.set_focus();
             }
         }))
+    } else {
+        builder
+    };
+    builder
         .invoke_handler(tauri::generate_handler![
             commands::foundation_get_status,
             commands::diagnostics_export,
             commands::config_get_startup_state,
             commands::legacy_migration_status,
+            commands::legacy_import_source,
             commands::config_get_public,
             commands::model_provider_save,
             commands::model_provider_test,
@@ -78,6 +110,7 @@ pub fn run() {
             commands::material_import,
             commands::material_search,
             commands::material_delete,
+            commands::material_index,
             commands::session_start,
             commands::session_stop,
             commands::session_set_mode,
@@ -92,35 +125,47 @@ pub fn run() {
             commands::config_restore_defaults,
             commands::open_app_directory,
         ])
-        .setup(|app| {
-            let data_directory = app.path().app_data_dir()?;
-            let config_root = app.path().config_dir()?;
-            let config_dirs = config::ConfigDirs {
-                repository: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .parent()
-                    .expect("manifest has parent")
-                    .to_path_buf(),
-                roaming_app_data: config_root,
-            };
-            let config_location = config::locate_config(
-                &std::env::args_os().collect::<Vec<_>>(),
-                &std::env::vars_os()
-                    .filter(|(key, _)| key == "AI_VIRTUAL_ASSISTANT_CONFIG")
-                    .filter_map(|(key, value)| key.into_string().ok().map(|key| (key, value)))
-                    .collect(),
-                &config_dirs,
-                cfg!(debug_assertions),
-            )?;
-            app.manage(app_state::AppState::production(app_state::AppPaths {
-                logs_directory: data_directory.join("logs"),
-                config_path: config_location.path,
-                data_directory,
-                legacy_search_roots: migrate::legacy_search_roots(
+        .setup(move |app| {
+            if let Some(isolated) = isolated.as_ref() {
+                app.manage(app_state::AppState::production_namespaced(
+                    isolated.paths.clone(),
+                    isolated.secret_namespace.clone(),
+                )?);
+            } else {
+                let data_directory = app.path().app_data_dir()?;
+                let config_root = app.path().config_dir()?;
+                let config_dirs = config::ConfigDirs {
+                    repository: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .parent()
+                        .expect("manifest has parent")
+                        .to_path_buf(),
+                    roaming_app_data: config_root,
+                };
+                let config_location = config::locate_config(
+                    &arguments,
+                    &std::env::vars_os()
+                        .filter(|(key, _)| key == "AI_VIRTUAL_ASSISTANT_CONFIG")
+                        .filter_map(|(key, value)| key.into_string().ok().map(|key| (key, value)))
+                        .collect(),
                     &config_dirs,
                     cfg!(debug_assertions),
-                ),
-            })?);
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+                )?;
+                app.manage(app_state::AppState::production(app_state::AppPaths {
+                    logs_directory: data_directory.join("logs"),
+                    config_path: config_location.path,
+                    data_directory,
+                    legacy_search_roots: migrate::legacy_search_roots(
+                        &config_dirs,
+                        cfg!(debug_assertions),
+                    ),
+                })?);
+            }
+            let mut window =
+                WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()));
+            if let Some(isolated) = isolated.as_ref() {
+                window = window.data_directory(isolated.webview_data_directory.clone());
+            }
+            window
                 .title("AI Virtual Assistant")
                 .inner_size(1180.0, 760.0)
                 .min_inner_size(900.0, 620.0)

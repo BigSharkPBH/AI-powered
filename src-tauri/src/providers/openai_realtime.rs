@@ -15,6 +15,8 @@ use tungstenite::{
     protocol::WebSocketConfig, stream::MaybeTlsStream,
 };
 
+use crate::audio::resample_pcm16_mono;
+
 use super::ProviderEndpoint;
 
 pub const ALIYUN_REALTIME_PATH: &str = "/api-ws/v1/realtime";
@@ -106,14 +108,19 @@ pub struct RealtimeTextRequest<'a> {
     pub include_audio: bool,
 }
 
+pub struct RealtimeAudioRequest<'a> {
+    pub endpoint: &'a ProviderEndpoint,
+    pub credential: Option<&'a str>,
+    pub model_id: &'a str,
+    pub pcm16le: &'a [u8],
+    pub sample_rate: u32,
+    pub instructions: &'a str,
+}
+
 pub trait RealtimeModel: Send + Sync {
     fn transcribe_turn(
         &self,
-        endpoint: &ProviderEndpoint,
-        credential: Option<&str>,
-        model_id: &str,
-        pcm16le: &[u8],
-        sample_rate: u32,
+        request: RealtimeAudioRequest<'_>,
         cancel: &AtomicBool,
     ) -> Result<RealtimeTurn, RealtimeError>;
 
@@ -148,27 +155,28 @@ impl Default for OpenAiCompatibleRealtime {
 impl RealtimeModel for OpenAiCompatibleRealtime {
     fn transcribe_turn(
         &self,
-        endpoint: &ProviderEndpoint,
-        credential: Option<&str>,
-        model_id: &str,
-        pcm16le: &[u8],
-        sample_rate: u32,
+        request: RealtimeAudioRequest<'_>,
         cancel: &AtomicBool,
     ) -> Result<RealtimeTurn, RealtimeError> {
-        let _ = sample_rate;
         if cancel.load(Ordering::Relaxed) {
             return Err(RealtimeError::Cancelled);
         }
-        let url = realtime_url(&endpoint.base_url, model_id)?;
-        let dialect = realtime_dialect(&endpoint.base_url);
-        let mut socket = connect_realtime(&url, credential)?;
-        let update = session_update_event("", "", &dialect);
+        let url = realtime_url(&request.endpoint.base_url, request.model_id)?;
+        let dialect = realtime_dialect(&request.endpoint.base_url);
+        let pcm16le = resample_pcm16_mono(
+            request.pcm16le,
+            request.sample_rate,
+            dialect_input_rate(&dialect),
+        );
+        let mut socket = connect_realtime(&url, request.credential)?;
+        let voice = dialect.default_voice.unwrap_or("");
+        let update = session_update_event(voice, request.instructions, &dialect);
         send_text(&mut socket, &update.to_string())?;
         wait_session_updated(&mut socket, SESSION_UPDATED_TIMEOUT)?;
         if cancel.load(Ordering::Relaxed) {
             return Err(RealtimeError::Cancelled);
         }
-        send_text(&mut socket, &append_audio_event(pcm16le))?;
+        send_text(&mut socket, &append_audio_event(&pcm16le))?;
         send_text(&mut socket, r#"{"type":"input_audio_buffer.commit"}"#)?;
         collect_turn(&mut socket, cancel)
     }
@@ -327,6 +335,13 @@ pub fn realtime_url(base_url: &str, model: &str) -> Result<Url, RealtimeError> {
     url.set_fragment(None);
     url.query_pairs_mut().append_pair("model", model);
     Ok(url)
+}
+
+pub fn dialect_input_rate(dialect: &RealtimeDialect) -> u32 {
+    match dialect.audio_format {
+        "pcm16" => 24_000,
+        _ => 16_000,
+    }
 }
 
 pub fn session_update_event(voice: &str, instructions: &str, dialect: &RealtimeDialect) -> Value {

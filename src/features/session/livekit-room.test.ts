@@ -1,15 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const connect = vi.fn();
+const disconnect = vi.fn();
+const setMicrophoneEnabled = vi.fn();
 
 vi.mock("livekit-client", () => {
   class Room {
     connect = connect;
+    disconnect = disconnect;
+    localParticipant = { setMicrophoneEnabled };
   }
   return { Room };
 });
 
-import { connectLiveKitRoom } from "./livekit-room";
+import { connectLiveKitRoom, disconnectLiveKitRoom } from "./livekit-room";
 
 describe("connectLiveKitRoom", () => {
   beforeEach(() => {
@@ -35,7 +39,10 @@ describe("connectLiveKitRoom", () => {
     const room = await connectLiveKitRoom(join);
 
     expect(connect).toHaveBeenCalledWith(join.url, join.token);
+    expect(setMicrophoneEnabled).toHaveBeenCalledWith(true);
     expect(room).toBeDefined();
+    await disconnectLiveKitRoom(room);
+    expect(disconnect).toHaveBeenCalled();
     for (const spy of [log, info, debug, warn, error]) {
       expect(spy.mock.calls.flat().join(" ")).not.toContain(join.token);
       spy.mockRestore();

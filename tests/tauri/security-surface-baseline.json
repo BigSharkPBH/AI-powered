@@ -3,13 +3,13 @@
   "algorithm": "sha256",
   "normalization": "crlf-to-lf",
   "files": {
-    "src-tauri/capabilities/main.json": "1eb54a836c7da43e75d6e4b7bf162a19bbc01c82e60a7e486291682c6eb71b80",
-    "src-tauri/src/lib.rs": "e8f507e15ae6dc1000c46e59e6176c79760f814e2c57de7f87b00c1faa7cf44f",
-    "src-tauri/src/contracts.rs": "0dad5c1477be447437bd2e3c19755688c6e0210c272e0083e9053321b2cf9f81",
-    "src-tauri/src/commands.rs": "7062e06220c94429914f2ab981854c1e76b717ef042ff4056c0b74197b0c64f6",
+    "src-tauri/capabilities/main.json": "d3bc3625bf7cdeefcc6d3924f88bc2ed0c9b15fdc64a4ac4283e1f41bd5164a1",
+    "src-tauri/src/lib.rs": "03ea29b51e81ddd1e2a51f2530cf1822c2b01269581403abb6f77e50a86df13f",
+    "src-tauri/src/contracts.rs": "254ed0c1871c82ed4f0147deabd412dcbab6cc5f0a5d64745558f6117bc7109d",
+    "src-tauri/src/commands.rs": "88c0e865383fce1bf70a58395ef60e7b9c3e4814de612d3601dba5bb1d4af8f6",
     "src-tauri/tauri.conf.json": "90f68864746c5f8583397e7cdacb3b34e9397afeb7128cb34f837f4235a286e0",
-    "src/api/commands.ts": "8f5ab3aaf5302ba4d8d820df9ef46eafa362c441565fa0376db280f3f6ade02f",
-    "src/generated/bindings.ts": "bc4fcda91a602abcdec2caa2ad395287e96ae8cb30e209b11535f78adba5a61c",
+    "src/api/commands.ts": "042919d2eb7bd7aa2685f4626039231b0debb3185b751a87461469fe82007efc",
+    "src/generated/bindings.ts": "b503ba480fa5a25c94d7823f1845a196d291c8c97a8bfa212f1d5e538ba0cc96",
     "tests/tauri/shell-contract.test.mjs": "7a9e13b97754f371ec3e95d3c01cc888394e007207ea16371768574e09ed452f",
     "src-tauri/tests/security_contract.rs": "22e42bfb76980bd585e6b012585207d39a1a8848b707336b0ebbc14f7dfb7ea3"
   }

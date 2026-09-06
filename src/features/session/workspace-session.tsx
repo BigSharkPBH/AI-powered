@@ -1,6 +1,7 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 
 import * as api from "../../api/commands";
+import { connectLiveKitRoom, disconnectLiveKitRoom } from "./livekit-room";
 import type {
   AgentCommandInput,
   CommandResult,
@@ -69,6 +70,9 @@ export function WorkspaceSession({
   const [revision, setRevision] = useState(0);
   const [reportSummary, setReportSummary] = useState("");
   const [reportDetail, setReportDetail] = useState("");
+  const [transport, setTransport] = useState<"direct" | "livekit">("direct");
+  const [livekitState, setLivekitState] = useState("idle");
+  const livekitRoom = useRef<Awaited<ReturnType<typeof connectLiveKitRoom>> | null>(null);
   const statusSeq = useRef(0);
   const transcriptSeq = useRef(0);
   const replySeq = useRef(0);
@@ -198,7 +202,7 @@ export function WorkspaceSession({
   async function start() {
     setBusy(true);
     try {
-      const result = await api.startSession();
+      const result = await api.startSession(transport);
       if (!result.ok) {
         setMessage(errorText(result.error));
         return;
@@ -221,6 +225,16 @@ export function WorkspaceSession({
       setReportSummary("");
       setReportDetail("");
       setMessage("");
+      setLivekitState("idle");
+      if (result.data.livekit) {
+        try {
+          livekitRoom.current = await connectLiveKitRoom(result.data.livekit);
+          setLivekitState("connected");
+        } catch {
+          setLivekitState("error");
+          setMessage("LIVEKIT_CONNECT_FAILED：无法进入房间");
+        }
+      }
       await refresh(result.data.session.id);
     } catch {
       setMessage("IPC_UNAVAILABLE：本地操作失败");
@@ -230,6 +244,9 @@ export function WorkspaceSession({
   }
 
   async function stop() {
+    await disconnectLiveKitRoom(livekitRoom.current);
+    livekitRoom.current = null;
+    setLivekitState("idle");
     const ok = await run(() => api.stopSession());
     if (ok) {
       await refresh();
@@ -363,6 +380,32 @@ export function WorkspaceSession({
       )}
       <p>阶段 {phase}</p>
       <p>模式 {mode}</p>
+      <fieldset>
+        <legend>传输</legend>
+        <label>
+          <input
+            type="radio"
+            name="transport"
+            value="direct"
+            checked={transport === "direct"}
+            disabled={busy || active}
+            onChange={() => setTransport("direct")}
+          />
+          本机直连
+        </label>
+        <label>
+          <input
+            type="radio"
+            name="transport"
+            value="livekit"
+            checked={transport === "livekit"}
+            disabled={busy || active}
+            onChange={() => setTransport("livekit")}
+          />
+          LiveKit
+        </label>
+      </fieldset>
+      {livekitState !== "idle" && <p>LiveKit {livekitState}</p>}
       <div className="service-actions">
         <button disabled={busy || active} type="button" onClick={() => void start()}>
           开始

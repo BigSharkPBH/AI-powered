@@ -1,6 +1,6 @@
 use std::sync::{TryLockError, atomic::Ordering};
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::{
     app_state::AppState,
@@ -10,8 +10,8 @@ use crate::{
     },
     contracts::{
         AgentCommandInput, AgentCommandResult, AudioLevelEvent, CommandResult,
-        DiagnosticsExportResult, FoundationStatus, LegacyMigrationStatus, RuntimeStatus,
-        SessionCitationView, SessionDetail, SessionExportResult, SessionReplyEvent,
+        DiagnosticsExportResult, FoundationStatus, LegacyMigrationStatus, LegacySessionImport,
+        RuntimeStatus, SessionCitationView, SessionDetail, SessionExportResult, SessionReplyEvent,
         SessionStartResult, SessionSummary, SessionTranscriptEvent, SessionTurnView, StartupState,
     },
     error::PublicError,
@@ -26,12 +26,12 @@ use crate::{
     services::{
         EmbeddingConfigSaveInput, EmbeddingService, EmbeddingServiceError, EmbeddingTestResult,
         LiveKitJoinToken, LiveKitSettingsError, LiveKitSettingsSaveInput, LiveKitSettingsService,
-        LiveKitTestResult, MaterialSearchHit, MaterialService, MaterialServiceError,
-        MaterialSummary, ModelDiscoveryResult, ProviderSaveInput, ProviderService,
-        ProviderServiceError, ProviderTestResult, RoleProfileCopyInput, RoleProfileSaveInput,
-        RoleProfileService, RoleProfileServiceError, SessionProbes, SessionServiceError,
-        SessionStartOutcome, VoiceRouteSaveInput, VoiceRouteService, VoiceRouteServiceError,
-        VoiceRouteTestResult,
+        LiveKitTestResult, MaterialIndexResult, MaterialSearchHit, MaterialService,
+        MaterialServiceError, MaterialSummary, ModelDiscoveryResult, ProviderSaveInput,
+        ProviderService, ProviderServiceError, ProviderTestResult, RoleProfileCopyInput,
+        RoleProfileSaveInput, RoleProfileService, RoleProfileServiceError, SessionProbes,
+        SessionServiceError, SessionStartOutcome, VoiceRouteSaveInput, VoiceRouteService,
+        VoiceRouteServiceError, VoiceRouteTestResult,
     },
     sessions::{SessionExportError, SessionExportFormat, SessionStore, export_session},
 };
@@ -43,8 +43,7 @@ pub fn foundation_get_status() -> CommandResult<FoundationStatus> {
     }
 }
 
-#[tauri::command]
-pub fn diagnostics_export(
+pub fn diagnostics_export_blocking(
     state: State<'_, AppState>,
     destination: String,
 ) -> CommandResult<DiagnosticsExportResult> {
@@ -113,9 +112,64 @@ fn legacy_migration_status_cmd(state: &AppState) -> CommandResult<LegacyMigratio
     }
 }
 
-#[tauri::command]
-pub fn legacy_migration_status(state: State<'_, AppState>) -> CommandResult<LegacyMigrationStatus> {
+pub fn legacy_migration_status_blocking(
+    state: State<'_, AppState>,
+) -> CommandResult<LegacyMigrationStatus> {
     legacy_migration_status_cmd(&state)
+}
+
+fn resolve_legacy_source_path(
+    path: &str,
+) -> Result<std::path::PathBuf, crate::migrate::MigrateError> {
+    let path = std::path::Path::new(path);
+    if path.is_relative() {
+        return Err(crate::migrate::MigrateError::Operation);
+    }
+    if std::fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(crate::migrate::MigrateError::Operation);
+    }
+    std::fs::canonicalize(path).map_err(|_| crate::migrate::MigrateError::Operation)
+}
+
+fn migrate_error<T: ts_rs::TS>(error: crate::migrate::MigrateError) -> CommandResult<T> {
+    let message = match error {
+        crate::migrate::MigrateError::PayloadInvalid => "旧会话数据无法解析",
+        crate::migrate::MigrateError::AlreadyApplied => "目标数据目录已经完成迁移",
+        _ => "无法从所选目录导入旧会话",
+    };
+    service_error(error.code(), message)
+}
+
+fn legacy_import_source_cmd(state: &AppState, path: String) -> CommandResult<LegacySessionImport> {
+    let source = match resolve_legacy_source_path(&path) {
+        Ok(path) => path,
+        Err(error) => return migrate_error(error),
+    };
+    let database = match state.database.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            return service_error("DATABASE_OPERATION_FAILED", "Database is unavailable");
+        }
+    };
+    let Some(database) = database.as_ref() else {
+        return service_error("DATABASE_OPERATION_FAILED", "Database is unavailable");
+    };
+    crate::migrate::import_legacy_sessions_from_user_path(&source, database)
+        .map_or_else(migrate_error, |data| CommandResult::Ok { data })
+}
+
+pub fn legacy_import_source_blocking(
+    state: State<'_, AppState>,
+    path: String,
+) -> CommandResult<LegacySessionImport> {
+    let _guard = match service_guard(&state) {
+        Ok(guard) => guard,
+        Err(error) => return error,
+    };
+    legacy_import_source_cmd(&state, path)
 }
 
 /// Thin, read-only projection of the loaded configuration onto its redacted
@@ -133,8 +187,7 @@ fn public_config(state: &AppState) -> CommandResult<PublicConfig> {
     }
 }
 
-#[tauri::command]
-pub fn config_get_public(state: State<'_, AppState>) -> CommandResult<PublicConfig> {
+pub fn config_get_public_blocking(state: State<'_, AppState>) -> CommandResult<PublicConfig> {
     public_config(&state)
 }
 
@@ -266,6 +319,10 @@ fn material_service_error<T: ts_rs::TS>(error: MaterialServiceError) -> CommandR
         "MATERIAL_PARSE_FAILED" => "Material could not be parsed",
         "MATERIAL_NOT_FOUND" => "Material not found",
         "MATERIAL_PATH_INVALID" => "Material path is invalid",
+        "MATERIAL_PARSE_BUDGET" => "Material parse budget was exceeded",
+        "EMBEDDING_NOT_READY" => "Embedding configuration is not ready",
+        "EMBEDDING_NOT_FOUND" => "Embedding configuration was not found",
+        "EMBEDDING_FIELDS_INVALID" => "Embedding configuration is invalid",
         _ => "Material operation failed",
     };
     let mut public = PublicError::new(code, message, false);
@@ -335,13 +392,24 @@ fn material_delete_cmd(state: &AppState, id: String) -> CommandResult<Foundation
     })
 }
 
-#[tauri::command]
-pub fn material_list(state: State<'_, AppState>) -> CommandResult<Vec<MaterialSummary>> {
+fn material_index_cmd(state: &AppState) -> CommandResult<MaterialIndexResult> {
+    let probe = match embedding_probe() {
+        Ok(probe) => probe,
+        Err(error) => return error,
+    };
+    with_materials(state, |service| {
+        service.index_library(&state.config, &state.secrets, &probe)
+    })
+}
+
+pub fn material_list_blocking(state: State<'_, AppState>) -> CommandResult<Vec<MaterialSummary>> {
     material_list_cmd(&state)
 }
 
-#[tauri::command]
-pub fn material_import(state: State<'_, AppState>, path: String) -> CommandResult<MaterialSummary> {
+pub fn material_import_blocking(
+    state: State<'_, AppState>,
+    path: String,
+) -> CommandResult<MaterialSummary> {
     let _guard = match service_guard(&state) {
         Ok(guard) => guard,
         Err(error) => return error,
@@ -349,8 +417,7 @@ pub fn material_import(state: State<'_, AppState>, path: String) -> CommandResul
     material_import_cmd(&state, path)
 }
 
-#[tauri::command]
-pub fn material_search(
+pub fn material_search_blocking(
     state: State<'_, AppState>,
     query: String,
     top_k: Option<u32>,
@@ -358,13 +425,23 @@ pub fn material_search(
     material_search_cmd(&state, query, top_k)
 }
 
-#[tauri::command]
-pub fn material_delete(state: State<'_, AppState>, id: String) -> CommandResult<FoundationStatus> {
+pub fn material_delete_blocking(
+    state: State<'_, AppState>,
+    id: String,
+) -> CommandResult<FoundationStatus> {
     let _guard = match service_guard(&state) {
         Ok(guard) => guard,
         Err(error) => return error,
     };
     material_delete_cmd(&state, id)
+}
+
+pub fn material_index_blocking(state: State<'_, AppState>) -> CommandResult<MaterialIndexResult> {
+    let _guard = match service_guard(&state) {
+        Ok(guard) => guard,
+        Err(error) => return error,
+    };
+    material_index_cmd(&state)
 }
 
 const EVENT_RUNTIME_STATUS: &str = "runtime.status.v1";
@@ -450,7 +527,7 @@ fn bump_runtime_status(state: &AppState) -> RuntimeStatus {
     runtime_status_from_state(state)
 }
 
-fn emit_runtime(app: &AppHandle, state: &AppState) {
+fn emit_runtime<R: tauri::Runtime>(app: &AppHandle<R>, state: &AppState) {
     let status = bump_runtime_status(state);
     let _ = app.emit(EVENT_RUNTIME_STATUS, &status);
     if let Ok(sessions) = state.sessions.try_lock() {
@@ -507,8 +584,8 @@ fn audio_level_event(seq: u64, peak: f64) -> serde_json::Value {
     serde_json::to_value(AudioLevelEvent { peak, seq }).expect("audio level")
 }
 
-fn emit_transcript_and_reply(
-    app: &AppHandle,
+fn emit_transcript_and_reply<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     state: &AppState,
     user_text: &str,
     assistant_text: &str,
@@ -964,9 +1041,8 @@ fn runtime_get_status_cmd(state: &AppState) -> CommandResult<RuntimeStatus> {
     }
 }
 
-#[tauri::command]
-pub fn session_start(
-    app: AppHandle,
+pub fn session_start_blocking<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: State<'_, AppState>,
     transport_mode: Option<String>,
 ) -> CommandResult<SessionStartResult> {
@@ -987,7 +1063,10 @@ pub fn session_start(
 }
 
 #[tauri::command]
-pub fn session_stop(app: AppHandle, state: State<'_, AppState>) -> CommandResult<SessionSummary> {
+pub fn session_stop<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+) -> CommandResult<SessionSummary> {
     state.session_control.request_stop();
     let _guard = match service_guard_try(&state) {
         Ok(Some(guard)) => guard,
@@ -1008,8 +1087,8 @@ pub fn session_stop(app: AppHandle, state: State<'_, AppState>) -> CommandResult
 }
 
 #[tauri::command]
-pub fn session_set_mode(
-    app: AppHandle,
+pub fn session_set_mode<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: State<'_, AppState>,
     mode: String,
 ) -> CommandResult<RuntimeStatus> {
@@ -1024,8 +1103,7 @@ pub fn session_set_mode(
     result
 }
 
-#[tauri::command]
-pub fn session_export(
+pub fn session_export_blocking(
     state: State<'_, AppState>,
     session_id: String,
     format: String,
@@ -1037,18 +1115,18 @@ pub fn session_export(
     session_export_cmd(&state, session_id, format)
 }
 
-#[tauri::command]
-pub fn session_list(state: State<'_, AppState>) -> CommandResult<Vec<SessionSummary>> {
+pub fn session_list_blocking(state: State<'_, AppState>) -> CommandResult<Vec<SessionSummary>> {
     session_list_cmd(&state)
 }
 
-#[tauri::command]
-pub fn session_get(state: State<'_, AppState>, session_id: String) -> CommandResult<SessionDetail> {
+pub fn session_get_blocking(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> CommandResult<SessionDetail> {
     session_get_cmd(&state, session_id)
 }
 
-#[tauri::command]
-pub fn session_delete(
+pub fn session_delete_blocking(
     state: State<'_, AppState>,
     session_id: String,
 ) -> CommandResult<FoundationStatus> {
@@ -1059,9 +1137,8 @@ pub fn session_delete(
     session_delete_cmd(&state, session_id)
 }
 
-#[tauri::command]
-pub fn session_finalize_utterance(
-    app: AppHandle,
+pub fn session_finalize_utterance_blocking<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: State<'_, AppState>,
     text: String,
 ) -> CommandResult<SessionTurnView> {
@@ -1152,9 +1229,8 @@ pub fn session_finalize_utterance(
     result
 }
 
-#[tauri::command]
-pub fn session_agent_command(
-    app: AppHandle,
+pub fn session_agent_command_blocking<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: State<'_, AppState>,
     input: AgentCommandInput,
 ) -> CommandResult<AgentCommandResult> {
@@ -1277,8 +1353,7 @@ fn service_guard_try<T: ts_rs::TS>(
     }
 }
 
-#[tauri::command(async)]
-pub fn model_provider_save(
+pub fn model_provider_save_blocking(
     state: State<'_, AppState>,
     input: ProviderSaveInput,
 ) -> CommandResult<ProviderConfig> {
@@ -1295,8 +1370,7 @@ pub fn model_provider_save(
         .map_or_else(provider_service_error, |data| CommandResult::Ok { data })
 }
 
-#[tauri::command(async)]
-pub fn model_provider_test(
+pub fn model_provider_test_blocking(
     state: State<'_, AppState>,
     provider_id: String,
 ) -> CommandResult<ProviderTestResult> {
@@ -1313,8 +1387,7 @@ pub fn model_provider_test(
         .map_or_else(provider_service_error, |data| CommandResult::Ok { data })
 }
 
-#[tauri::command(async)]
-pub fn model_provider_discover(
+pub fn model_provider_discover_blocking(
     state: State<'_, AppState>,
     provider_id: String,
 ) -> CommandResult<ModelDiscoveryResult> {
@@ -1331,8 +1404,7 @@ pub fn model_provider_discover(
         .map_or_else(provider_service_error, |data| CommandResult::Ok { data })
 }
 
-#[tauri::command(async)]
-pub fn model_provider_activate(
+pub fn model_provider_activate_blocking(
     state: State<'_, AppState>,
     provider_id: String,
 ) -> CommandResult<ProviderConfig> {
@@ -1349,8 +1421,7 @@ pub fn model_provider_activate(
         .map_or_else(provider_service_error, |data| CommandResult::Ok { data })
 }
 
-#[tauri::command(async)]
-pub fn model_provider_delete(
+pub fn model_provider_delete_blocking(
     state: State<'_, AppState>,
     provider_id: String,
 ) -> CommandResult<FoundationStatus> {
@@ -1369,8 +1440,7 @@ pub fn model_provider_delete(
         })
 }
 
-#[tauri::command(async)]
-pub fn speech_route_save(
+pub fn speech_route_save_blocking(
     state: State<'_, AppState>,
     input: VoiceRouteSaveInput,
 ) -> CommandResult<VoiceRouteConfig> {
@@ -1387,8 +1457,7 @@ pub fn speech_route_save(
         .map_or_else(route_service_error, |data| CommandResult::Ok { data })
 }
 
-#[tauri::command(async)]
-pub fn speech_route_test(
+pub fn speech_route_test_blocking(
     state: State<'_, AppState>,
     route_id: String,
 ) -> CommandResult<VoiceRouteTestResult> {
@@ -1405,8 +1474,7 @@ pub fn speech_route_test(
         .map_or_else(route_service_error, |data| CommandResult::Ok { data })
 }
 
-#[tauri::command(async)]
-pub fn speech_route_activate(
+pub fn speech_route_activate_blocking(
     state: State<'_, AppState>,
     route_id: String,
 ) -> CommandResult<VoiceRouteConfig> {
@@ -1423,8 +1491,7 @@ pub fn speech_route_activate(
         .map_or_else(route_service_error, |data| CommandResult::Ok { data })
 }
 
-#[tauri::command(async)]
-pub fn speech_route_delete(
+pub fn speech_route_delete_blocking(
     state: State<'_, AppState>,
     route_id: String,
 ) -> CommandResult<FoundationStatus> {
@@ -1443,8 +1510,7 @@ pub fn speech_route_delete(
         })
 }
 
-#[tauri::command(async)]
-pub fn role_profile_save(
+pub fn role_profile_save_blocking(
     state: State<'_, AppState>,
     input: RoleProfileSaveInput,
 ) -> CommandResult<RoleProfileConfig> {
@@ -1457,8 +1523,7 @@ pub fn role_profile_save(
         .map_or_else(role_service_error, |data| CommandResult::Ok { data })
 }
 
-#[tauri::command(async)]
-pub fn role_profile_copy(
+pub fn role_profile_copy_blocking(
     state: State<'_, AppState>,
     input: RoleProfileCopyInput,
 ) -> CommandResult<RoleProfileConfig> {
@@ -1471,8 +1536,7 @@ pub fn role_profile_copy(
         .map_or_else(role_service_error, |data| CommandResult::Ok { data })
 }
 
-#[tauri::command(async)]
-pub fn role_profile_activate(
+pub fn role_profile_activate_blocking(
     state: State<'_, AppState>,
     role_id: String,
 ) -> CommandResult<RoleProfileConfig> {
@@ -1485,8 +1549,7 @@ pub fn role_profile_activate(
         .map_or_else(role_service_error, |data| CommandResult::Ok { data })
 }
 
-#[tauri::command(async)]
-pub fn role_profile_delete(
+pub fn role_profile_delete_blocking(
     state: State<'_, AppState>,
     role_id: String,
 ) -> CommandResult<FoundationStatus> {
@@ -1501,8 +1564,7 @@ pub fn role_profile_delete(
         })
 }
 
-#[tauri::command(async)]
-pub fn embedding_config_save(
+pub fn embedding_config_save_blocking(
     state: State<'_, AppState>,
     input: EmbeddingConfigSaveInput,
 ) -> CommandResult<EmbeddingConfig> {
@@ -1519,8 +1581,7 @@ pub fn embedding_config_save(
         .map_or_else(embedding_service_error, |data| CommandResult::Ok { data })
 }
 
-#[tauri::command(async)]
-pub fn embedding_config_test(
+pub fn embedding_config_test_blocking(
     state: State<'_, AppState>,
     embedding_id: String,
 ) -> CommandResult<EmbeddingTestResult> {
@@ -1537,8 +1598,7 @@ pub fn embedding_config_test(
         .map_or_else(embedding_service_error, |data| CommandResult::Ok { data })
 }
 
-#[tauri::command(async)]
-pub fn embedding_config_activate(
+pub fn embedding_config_activate_blocking(
     state: State<'_, AppState>,
     embedding_id: String,
 ) -> CommandResult<EmbeddingConfig> {
@@ -1555,8 +1615,7 @@ pub fn embedding_config_activate(
         .map_or_else(embedding_service_error, |data| CommandResult::Ok { data })
 }
 
-#[tauri::command(async)]
-pub fn embedding_config_delete(
+pub fn embedding_config_delete_blocking(
     state: State<'_, AppState>,
     embedding_id: String,
 ) -> CommandResult<FoundationStatus> {
@@ -1575,8 +1634,7 @@ pub fn embedding_config_delete(
         })
 }
 
-#[tauri::command(async)]
-pub fn livekit_settings_save(
+pub fn livekit_settings_save_blocking(
     state: State<'_, AppState>,
     input: LiveKitSettingsSaveInput,
 ) -> CommandResult<LiveKitConfig> {
@@ -1593,8 +1651,9 @@ pub fn livekit_settings_save(
         .map_or_else(livekit_service_error, |data| CommandResult::Ok { data })
 }
 
-#[tauri::command(async)]
-pub fn livekit_settings_test(state: State<'_, AppState>) -> CommandResult<LiveKitTestResult> {
+pub fn livekit_settings_test_blocking(
+    state: State<'_, AppState>,
+) -> CommandResult<LiveKitTestResult> {
     let _guard = match service_guard(&state) {
         Ok(guard) => guard,
         Err(error) => return error,
@@ -1608,8 +1667,7 @@ pub fn livekit_settings_test(state: State<'_, AppState>) -> CommandResult<LiveKi
         .map_or_else(livekit_service_error, |data| CommandResult::Ok { data })
 }
 
-#[tauri::command(async)]
-pub fn livekit_settings_enable(
+pub fn livekit_settings_enable_blocking(
     state: State<'_, AppState>,
     enabled: bool,
 ) -> CommandResult<LiveKitConfig> {
@@ -1626,8 +1684,7 @@ pub fn livekit_settings_enable(
         .map_or_else(livekit_service_error, |data| CommandResult::Ok { data })
 }
 
-#[tauri::command(async)]
-pub fn livekit_issue_join_token(
+pub fn livekit_issue_join_token_blocking(
     state: State<'_, AppState>,
     room: String,
     identity: String,
@@ -1645,8 +1702,9 @@ pub fn livekit_issue_join_token(
         .map_or_else(livekit_service_error, |data| CommandResult::Ok { data })
 }
 
-#[tauri::command]
-pub fn config_restore_last_good(state: State<'_, AppState>) -> CommandResult<StartupState> {
+pub fn config_restore_last_good_blocking(
+    state: State<'_, AppState>,
+) -> CommandResult<StartupState> {
     let _guard = match service_guard(&state) {
         Ok(guard) => guard,
         Err(error) => return error,
@@ -1656,8 +1714,7 @@ pub fn config_restore_last_good(state: State<'_, AppState>) -> CommandResult<Sta
     }
 }
 
-#[tauri::command]
-pub fn config_restore_defaults(state: State<'_, AppState>) -> CommandResult<StartupState> {
+pub fn config_restore_defaults_blocking(state: State<'_, AppState>) -> CommandResult<StartupState> {
     let _guard = match service_guard(&state) {
         Ok(guard) => guard,
         Err(error) => return error,
@@ -1736,6 +1793,80 @@ fn open_directory(_: &std::path::Path) -> Result<(), ()> {
     Err(())
 }
 
+// All filesystem/network work and contended locks live on blocking workers.
+// The owned handle keeps AppState alive without extending a borrowed State.
+async fn dispatch_blocking<T: ts_rs::TS + Send + 'static>(
+    work: impl FnOnce() -> CommandResult<T> + Send + 'static,
+) -> CommandResult<T> {
+    match tauri::async_runtime::spawn_blocking(work).await {
+        Ok(result) => result,
+        Err(_) => service_error("COMMAND_WORKER_FAILED", "Command worker failed"),
+    }
+}
+
+macro_rules! blocking_command {
+    ($name:ident, $worker:ident($($arg:ident: $ty:ty),*) -> $output:ty) => {
+        #[tauri::command]
+        pub async fn $name<R: tauri::Runtime>(
+            app: AppHandle<R>, $($arg: $ty),*
+        ) -> CommandResult<$output> {
+            dispatch_blocking(move || $worker(app.state(), $($arg),*)).await
+        }
+    };
+    (with_events $name:ident, $worker:ident($($arg:ident: $ty:ty),*) -> $output:ty) => {
+        #[tauri::command]
+        pub async fn $name<R: tauri::Runtime>(
+            app: AppHandle<R>, $($arg: $ty),*
+        ) -> CommandResult<$output> {
+            dispatch_blocking(move || $worker(app.clone(), app.state(), $($arg),*)).await
+        }
+    };
+}
+
+blocking_command!(diagnostics_export, diagnostics_export_blocking(destination: String) -> DiagnosticsExportResult);
+blocking_command!(legacy_migration_status, legacy_migration_status_blocking() -> LegacyMigrationStatus);
+blocking_command!(legacy_import_source, legacy_import_source_blocking(path: String) -> LegacySessionImport);
+blocking_command!(config_get_public, config_get_public_blocking() -> PublicConfig);
+blocking_command!(material_list, material_list_blocking() -> Vec<MaterialSummary>);
+blocking_command!(material_import, material_import_blocking(path: String) -> MaterialSummary);
+blocking_command!(material_search, material_search_blocking(query: String, top_k: Option<u32>) -> Vec<MaterialSearchHit>);
+blocking_command!(material_delete, material_delete_blocking(id: String) -> FoundationStatus);
+blocking_command!(material_index, material_index_blocking() -> MaterialIndexResult);
+blocking_command!(with_events session_start, session_start_blocking(transport_mode: Option<String>) -> SessionStartResult);
+blocking_command!(session_export, session_export_blocking(session_id: String, format: String) -> SessionExportResult);
+blocking_command!(session_list, session_list_blocking() -> Vec<SessionSummary>);
+blocking_command!(session_get, session_get_blocking(session_id: String) -> SessionDetail);
+blocking_command!(session_delete, session_delete_blocking(session_id: String) -> FoundationStatus);
+blocking_command!(with_events session_finalize_utterance, session_finalize_utterance_blocking(text: String) -> SessionTurnView);
+blocking_command!(with_events session_agent_command, session_agent_command_blocking(input: AgentCommandInput) -> AgentCommandResult);
+blocking_command!(model_provider_save, model_provider_save_blocking(input: ProviderSaveInput) -> ProviderConfig);
+blocking_command!(model_provider_test, model_provider_test_blocking(provider_id: String) -> ProviderTestResult);
+blocking_command!(model_provider_discover, model_provider_discover_blocking(provider_id: String) -> ModelDiscoveryResult);
+blocking_command!(model_provider_activate, model_provider_activate_blocking(provider_id: String) -> ProviderConfig);
+blocking_command!(model_provider_delete, model_provider_delete_blocking(provider_id: String) -> FoundationStatus);
+blocking_command!(speech_route_save, speech_route_save_blocking(input: VoiceRouteSaveInput) -> VoiceRouteConfig);
+blocking_command!(speech_route_test, speech_route_test_blocking(route_id: String) -> VoiceRouteTestResult);
+blocking_command!(speech_route_activate, speech_route_activate_blocking(route_id: String) -> VoiceRouteConfig);
+blocking_command!(speech_route_delete, speech_route_delete_blocking(route_id: String) -> FoundationStatus);
+blocking_command!(role_profile_save, role_profile_save_blocking(input: RoleProfileSaveInput) -> RoleProfileConfig);
+blocking_command!(role_profile_copy, role_profile_copy_blocking(input: RoleProfileCopyInput) -> RoleProfileConfig);
+blocking_command!(role_profile_activate, role_profile_activate_blocking(role_id: String) -> RoleProfileConfig);
+blocking_command!(role_profile_delete, role_profile_delete_blocking(role_id: String) -> FoundationStatus);
+blocking_command!(embedding_config_save, embedding_config_save_blocking(input: EmbeddingConfigSaveInput) -> EmbeddingConfig);
+blocking_command!(embedding_config_test, embedding_config_test_blocking(embedding_id: String) -> EmbeddingTestResult);
+blocking_command!(embedding_config_activate, embedding_config_activate_blocking(embedding_id: String) -> EmbeddingConfig);
+blocking_command!(embedding_config_delete, embedding_config_delete_blocking(embedding_id: String) -> FoundationStatus);
+blocking_command!(livekit_settings_save, livekit_settings_save_blocking(input: LiveKitSettingsSaveInput) -> LiveKitConfig);
+blocking_command!(livekit_settings_test, livekit_settings_test_blocking() -> LiveKitTestResult);
+blocking_command!(livekit_settings_enable, livekit_settings_enable_blocking(enabled: bool) -> LiveKitConfig);
+blocking_command!(livekit_issue_join_token, livekit_issue_join_token_blocking(room: String, identity: String) -> LiveKitJoinToken);
+blocking_command!(config_restore_last_good, config_restore_last_good_blocking() -> StartupState);
+blocking_command!(config_restore_defaults, config_restore_defaults_blocking() -> StartupState);
+
+#[cfg(test)]
+#[path = "commands_ipc_tests.rs"]
+mod ipc_tests;
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -1784,6 +1915,56 @@ mod tests {
         ] {
             assert!(!encoded.contains(needle), "leaked {needle}: {encoded}");
         }
+    }
+
+    #[test]
+    fn legacy_import_source_reads_user_selected_desktop_runtime() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("old-install");
+        std::fs::create_dir_all(source.join(".desktop-runtime/data")).unwrap();
+        let connection =
+            rusqlite::Connection::open(source.join(".desktop-runtime/data/app.sqlite")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE archived_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    finished_at TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                 );
+                 INSERT INTO archived_sessions
+                 VALUES (
+                    'legacy-session-1',
+                    '2026-01-02T03:05:00Z',
+                    '{\"sessionId\":\"legacy-session-1\",\"revision\":1,\"status\":\"finished\",\"speakingText\":\"\",\"candidateName\":\"合成姓名\",\"roleName\":\"合成岗位\",\"assistantRole\":\"interviewer\",\"jobDescription\":\"\",\"interviewFocus\":\"\",\"consentConfirmed\":true,\"consentConfirmedAt\":\"2026-01-02T03:00:00Z\",\"startedAt\":\"2026-01-02T03:04:00Z\",\"finishedAt\":\"2026-01-02T03:05:00Z\",\"transcript\":[{\"role\":\"candidate\",\"text\":\"合成会话轮次A\",\"at\":\"2026-01-02T03:04:05Z\"},{\"role\":\"interviewer\",\"text\":\"合成助手回复A\",\"at\":\"2026-01-02T03:04:06Z\"}],\"report\":null,\"resumeIds\":[],\"resumeId\":\"\"}',
+                    '2026-01-02T03:05:00Z'
+                 );",
+            )
+            .unwrap();
+        drop(connection);
+        let paths = AppPaths {
+            data_directory: directory.path().join("data"),
+            logs_directory: directory.path().join("logs"),
+            config_path: directory.path().join("config.json"),
+            legacy_search_roots: Vec::new(),
+        };
+        let state = AppState::initialize(paths, Arc::new(MemorySecretStore::default())).unwrap();
+        let json = serde_json::to_value(super::legacy_import_source_cmd(
+            &state,
+            source.to_string_lossy().into_owned(),
+        ))
+        .unwrap();
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["data"]["sessions"], 1);
+        assert_eq!(json["data"]["turns"], 1);
+        assert_eq!(
+            serde_json::to_value(super::legacy_import_source_cmd(
+                &state,
+                "relative/old".into()
+            ))
+            .unwrap()["ok"],
+            false
+        );
     }
 
     #[test]
@@ -2254,7 +2435,7 @@ mod tests {
         }
     }
 
-    fn ready_session_config() -> String {
+    pub(super) fn ready_session_config() -> String {
         r#"{
             "configVersion":1,
             "models":{"providers":[
@@ -2611,11 +2792,7 @@ mod tests {
     impl crate::providers::RealtimeModel for UnusedRealtime {
         fn transcribe_turn(
             &self,
-            _: &crate::providers::ProviderEndpoint,
-            _: Option<&str>,
-            _: &str,
-            _: &[u8],
-            _: u32,
+            _: crate::providers::RealtimeAudioRequest<'_>,
             _: &std::sync::atomic::AtomicBool,
         ) -> Result<crate::providers::RealtimeTurn, crate::providers::RealtimeError> {
             panic!("cascaded command test must not call Realtime")

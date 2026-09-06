@@ -38,6 +38,25 @@ pub fn index_chunks(
     space: &EmbeddingSpace,
     probe: &dyn EmbeddingProbe,
 ) -> Result<(), DatabaseError> {
+    index_chunks_at(
+        database,
+        space,
+        probe,
+        &ProviderEndpoint {
+            provider_id: space.provider_id.clone(),
+            base_url: String::new(),
+        },
+        None,
+    )
+}
+
+pub fn index_chunks_at(
+    database: &Database,
+    space: &EmbeddingSpace,
+    probe: &dyn EmbeddingProbe,
+    endpoint: &ProviderEndpoint,
+    credential: Option<&str>,
+) -> Result<(), DatabaseError> {
     if !(1..=65_536).contains(&space.dimensions) {
         return Err(DatabaseError::Operation);
     }
@@ -46,15 +65,11 @@ pub fn index_chunks(
     let table_plan = prepare_vector_table(database, space.dimensions)?;
 
     let chunks = load_indexable_chunks(database)?;
-    let endpoint = ProviderEndpoint {
-        provider_id: space.provider_id.clone(),
-        base_url: String::new(),
-    };
     let mut outcomes = Vec::with_capacity(chunks.len());
     for chunk in chunks {
         let outcome = match probe.embed(
-            &endpoint,
-            None,
+            endpoint,
+            credential,
             &space.model_id,
             space.dimensions,
             &chunk.content,

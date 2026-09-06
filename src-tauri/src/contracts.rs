@@ -12,16 +12,16 @@ use crate::services::LiveKitJoinToken;
 #[cfg(test)]
 use crate::services::{
     DiscoveredModelDto, EmbeddingConfigSaveInput, EmbeddingTestResult, LiveKitSettingsSaveInput,
-    LiveKitTestResult, MaterialSearchHit, MaterialSummary, ModelDiscoveryResult, ProviderSaveInput,
-    ProviderTestResult, RoleProfileCopyInput, RoleProfileSaveInput, VoiceRouteSaveInput,
-    VoiceRouteTestResult,
+    LiveKitTestResult, MaterialIndexResult, MaterialSearchHit, MaterialSummary,
+    ModelDiscoveryResult, ProviderSaveInput, ProviderTestResult, RoleProfileCopyInput,
+    RoleProfileSaveInput, VoiceRouteSaveInput, VoiceRouteTestResult,
 };
 
 use serde::{Serialize, Serializer, ser::SerializeMap};
 use ts_rs::TS;
 
 pub use crate::error::PublicError;
-pub use crate::migrate::LegacyMigrationStatus;
+pub use crate::migrate::{LegacyMigrationStatus, LegacySessionImport};
 pub use crate::runtime::PreflightIssue;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -248,6 +248,7 @@ fn generated_bindings() -> String {
         DiagnosticsExportResult::decl(&config),
         StartupState::decl(&config),
         crate::migrate::LegacyMigrationStatus::decl(&config),
+        crate::migrate::LegacySessionImport::decl(&config),
         // Config contract DTOs (Phase 3 Stage B): the redacted public
         // configuration tree. Providers only carry SecretSlot references; no
         // secret value is ever part of this contract.
@@ -281,6 +282,7 @@ fn generated_bindings() -> String {
         LiveKitTestResult::decl(&config),
         LiveKitJoinToken::decl(&config),
         MaterialSummary::decl(&config),
+        MaterialIndexResult::decl(&config),
         MaterialSearchHit::decl(&config),
         PreflightIssue::decl(&config),
         SessionSummary::decl(&config),
@@ -356,6 +358,7 @@ mod tests {
         assert!(bindings.contains("export type DiagnosticsExportResult"));
         assert!(bindings.contains("export type StartupState"));
         assert!(bindings.contains("export type LegacyMigrationStatus"));
+        assert!(bindings.contains("export type LegacySessionImport"));
         assert!(bindings.contains("reenterSecrets"));
         assert!(bindings.contains("export type PublicConfig"));
         assert!(bindings.contains("export type VoiceRouteMode"));
@@ -373,6 +376,10 @@ mod tests {
         );
         assert!(
             bindings.contains("export type MaterialSearchHit"),
+            "unexpected bindings:\n{bindings}"
+        );
+        assert!(
+            bindings.contains("export type MaterialIndexResult"),
             "unexpected bindings:\n{bindings}"
         );
         assert!(
