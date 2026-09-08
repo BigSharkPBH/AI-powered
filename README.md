@@ -42,7 +42,6 @@ npm run test:tauri-package
 - Direct Runtime：级联（ASR → LLM → TTS）与端到端 Realtime
 - 会话命令（播报、重试、修正、纪要等）
 - 可选 LiveKit 传输（同一套会话机；默认不依赖）
-- C# AudioBridge 仍用于会议进程音频采集
 - 无 Control API、无 Python Agent、无 Electron / Next.js
 
 页面：工作台、资料、记录、服务、设置。
@@ -55,7 +54,7 @@ npm run test:tauri-package
 
 ## OBS 与虚拟摄像头
 
-Phase 6 只完成了本机 OBS / AudioBridge 路径解析和前置探测。托管 OBS、虚拟摄像头启停和快捷键界面已延期；当前客户端不会创建场景、浏览器源或启动 Virtual Camera。不要用 Electron 去补完 OBS。
+Phase 6 只完成了本机 OBS 路径解析和前置探测。托管 OBS、虚拟摄像头启停和快捷键界面已延期；当前客户端不会创建场景、浏览器源或启动 Virtual Camera。不要用 Electron 去补完 OBS。
 
 可把官方便携 OBS 放到 `resources/prerequisites` 供探测使用；当前 Tauri 安装包不会管理或随包启动 OBS。
 

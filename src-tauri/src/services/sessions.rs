@@ -24,12 +24,6 @@ use crate::{
 
 use super::livekit::{LiveKitJoinToken, LiveKitSettingsError, LiveKitSettingsService};
 
-pub struct MeetingCapture<'a> {
-    pub exe: &'a std::path::Path,
-    pub pid: u32,
-    pub enumerator: &'a dyn crate::processes::ProcessEnumerator,
-}
-
 #[derive(Debug)]
 pub enum SessionServiceError {
     AlreadyActive,
@@ -39,7 +33,6 @@ pub enum SessionServiceError {
     SidecarFailed,
     Cascade(CascadeError),
     Realtime(RealtimeError),
-    Audio(AudioError),
     Database(DatabaseError),
     LiveKit(LiveKitSettingsError),
 }
@@ -55,7 +48,6 @@ impl SessionServiceError {
             Self::LiveKit(error) => error.code(),
             Self::Cascade(error) => error.code(),
             Self::Realtime(error) => error.code(),
-            Self::Audio(error) => error.code(),
             Self::Database(error) => error.code(),
         }
     }
@@ -74,12 +66,8 @@ impl From<RealtimeError> for SessionServiceError {
 }
 
 impl From<AudioError> for SessionServiceError {
-    fn from(error: AudioError) -> Self {
-        if error == AudioError::SidecarFailed {
-            Self::SidecarFailed
-        } else {
-            Self::Audio(error)
-        }
+    fn from(_: AudioError) -> Self {
+        Self::SidecarFailed
     }
 }
 
@@ -301,26 +289,6 @@ impl<S: PlaybackSink> SessionService<S> {
             secrets_ready,
             transport_mode,
             livekit,
-            None,
-        )
-    }
-
-    pub fn start_with_meeting_capture(
-        &mut self,
-        database: &Database,
-        config: &PublicConfig,
-        secrets_ready: bool,
-        transport_mode: Option<&str>,
-        livekit: Option<&LiveKitSettingsService<'_>>,
-        capture: MeetingCapture<'_>,
-    ) -> Result<SessionStartOutcome, SessionServiceError> {
-        self.start_inner(
-            database,
-            config,
-            secrets_ready,
-            transport_mode,
-            livekit,
-            Some(capture),
         )
     }
 
@@ -331,7 +299,6 @@ impl<S: PlaybackSink> SessionService<S> {
         secrets_ready: bool,
         transport_mode: Option<&str>,
         livekit: Option<&LiveKitSettingsService<'_>>,
-        capture: Option<MeetingCapture<'_>>,
     ) -> Result<SessionStartOutcome, SessionServiceError> {
         let issues = preflight(config, secrets_ready, true);
         if !issues.is_empty() {
@@ -352,10 +319,6 @@ impl<S: PlaybackSink> SessionService<S> {
         self.reset_runtime();
         self.unused_materials = false;
         self.last_error_code = None;
-        if let Some(capture) = capture {
-            self.capture =
-                AudioCapture::spawn_bridge(capture.exe, capture.pid, capture.enumerator)?;
-        }
         let session_id = uuid::Uuid::new_v4().to_string();
         let join_token = if transport_mode == "livekit" {
             let issuer =
@@ -1689,39 +1652,6 @@ mod tests {
         assert_eq!(snapshots[0].transport_mode, "direct");
         assert!(!snapshots[0].role_hash.is_empty());
         assert!(!snapshots[0].provider_ids.contains("sk-"));
-    }
-
-    #[test]
-    fn start_with_missing_bridge_exe_fails_closed_without_a_session() {
-        let directory = tempfile::tempdir().unwrap();
-        let database = Database::open(directory.path().join("app.sqlite3")).unwrap();
-        database.migrate().unwrap();
-        let mut service = SessionService::with_sink(RecordingSink::default());
-        let enumerator = crate::processes::InjectedProcessEnumerator::new(vec![
-            crate::processes::MeetingProcess {
-                pid: 4242,
-                name: "zoom.exe".into(),
-                title: "Zoom".into(),
-            },
-        ]);
-        let missing = directory.path().join("AudioBridge.exe");
-        let error = service
-            .start_with_meeting_capture(
-                &database,
-                &ready_public_config(),
-                true,
-                None,
-                None,
-                super::MeetingCapture {
-                    exe: &missing,
-                    pid: 4242,
-                    enumerator: &enumerator,
-                },
-            )
-            .expect_err("missing exe must fail");
-        assert_eq!(error.code(), "SESSION_SIDECAR_MISSING");
-        assert!(SessionStore::new(&database).list().unwrap().is_empty());
-        assert_eq!(service.phase(), SessionPhase::Idle);
     }
 
     #[test]

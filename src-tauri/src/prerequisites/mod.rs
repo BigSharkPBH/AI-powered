@@ -199,8 +199,6 @@ mod tests {
         PathRoots {
             resource_root: repository.join("resources"),
             data_directory: repository.join("data"),
-            repository,
-            development: true,
         }
     }
 

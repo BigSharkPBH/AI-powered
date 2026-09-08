@@ -12,7 +12,6 @@ pub mod materials;
 pub mod migrate;
 pub mod obs;
 pub mod prerequisites;
-pub mod processes;
 pub mod providers;
 pub mod runtime;
 pub mod secrets;

@@ -32,9 +32,8 @@ The source repository and Windows distribution use third-party components. Their
 | pdf-extract | MIT | https://github.com/jrmuizel/pdf-extract |
 | docx-rs | MIT | https://github.com/bokuweb/docx-rs |
 | windows-sys | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
-| NAudio.Wasapi | MIT | https://github.com/naudio/NAudio |
 
-Licenses above are taken from the locked crate / npm / NuGet metadata for the versions this repository depends on. Transitive crates keep their own licenses.
+Licenses above are taken from the locked crate / npm metadata for the versions this repository depends on. Transitive crates keep their own licenses.
 
 Portable OBS and VB-CABLE are not packaged or started by the current Tauri build. Path and probe code can use a local copy under `resources/prerequisites` if you place one there; that leftover is not a managed OBS / virtual-cam product path.
 

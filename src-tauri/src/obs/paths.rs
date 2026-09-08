@@ -1,4 +1,4 @@
-//! Resolve owned OBS, AudioBridge, and prerequisite paths. Does not download, copy, or spawn.
+//! Resolve owned OBS and prerequisite paths. Does not download, copy, or spawn.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -6,17 +6,14 @@ pub const OBS_PACKAGED_VERSION: &str = "32.2.1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathRoots {
-    pub repository: PathBuf,
     pub resource_root: PathBuf,
     pub data_directory: PathBuf,
-    pub development: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedPaths {
     pub obs_template: PathBuf,
     pub obs_runtime: PathBuf,
-    pub audio_bridge: PathBuf,
     pub vb_cable_pack: PathBuf,
     pub vb_cable_present: bool,
 }
@@ -59,10 +56,7 @@ pub fn owned_path(root: &Path, relative: &Path) -> Result<PathBuf, PathError> {
 }
 
 pub fn resolve_owned_paths(roots: &PathRoots) -> Result<ResolvedPaths, PathError> {
-    if !roots.repository.is_absolute()
-        || !roots.resource_root.is_absolute()
-        || !roots.data_directory.is_absolute()
-    {
+    if !roots.resource_root.is_absolute() || !roots.data_directory.is_absolute() {
         return Err(PathError::EscapedRoot);
     }
 
@@ -74,17 +68,6 @@ pub fn resolve_owned_paths(roots: &PathRoots) -> Result<ResolvedPaths, PathError
         &roots.data_directory,
         &Path::new("runtime/obs").join(OBS_PACKAGED_VERSION),
     )?;
-    let audio_bridge = if roots.development {
-        owned_path(
-            &roots.repository,
-            Path::new("native/AudioBridge/publish/AudioBridge.exe"),
-        )?
-    } else {
-        owned_path(
-            &roots.resource_root,
-            Path::new("audio-bridge/AudioBridge.exe"),
-        )?
-    };
     let vb_cable_pack = owned_path(&roots.resource_root, Path::new("prerequisites"))?;
     let vb_cable_dir = owned_path(&vb_cable_pack, Path::new("vb-cable"))?;
 
@@ -95,7 +78,6 @@ pub fn resolve_owned_paths(roots: &PathRoots) -> Result<ResolvedPaths, PathError
     Ok(ResolvedPaths {
         obs_template,
         obs_runtime,
-        audio_bridge,
         vb_cable_pack,
         vb_cable_present: vb_cable_dir.is_dir(),
     })
@@ -138,13 +120,11 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn roots(directory: &tempfile::TempDir, development: bool) -> PathRoots {
+    fn roots(directory: &tempfile::TempDir) -> PathRoots {
         let repository = directory.path().to_path_buf();
         PathRoots {
             resource_root: repository.join("resources"),
             data_directory: repository.join("data"),
-            repository,
-            development,
         }
     }
 
@@ -162,7 +142,7 @@ mod tests {
     #[test]
     fn missing_obs_template_is_typed_error() {
         let directory = tempfile::tempdir().unwrap();
-        let roots = roots(&directory, true);
+        let roots = roots(&directory);
         fs::create_dir_all(roots.resource_root.join("prerequisites")).unwrap();
         fs::create_dir_all(&roots.data_directory).unwrap();
         let error = resolve_owned_paths(&roots).expect_err("missing template");
@@ -173,7 +153,7 @@ mod tests {
     #[test]
     fn runtime_path_stays_under_data_directory() {
         let directory = tempfile::tempdir().unwrap();
-        let roots = roots(&directory, true);
+        let roots = roots(&directory);
         write_template(&roots);
         let resolved = resolve_owned_paths(&roots).expect("template present");
         assert_eq!(
@@ -192,40 +172,6 @@ mod tests {
                 .join("prerequisites")
                 .join("obs-portable")
         );
-    }
-
-    #[test]
-    fn development_audiobridge_is_publish_exe() {
-        let directory = tempfile::tempdir().unwrap();
-        let roots = roots(&directory, true);
-        write_template(&roots);
-        let resolved = resolve_owned_paths(&roots).expect("template present");
-        assert_eq!(
-            resolved.audio_bridge,
-            roots
-                .repository
-                .join("native")
-                .join("AudioBridge")
-                .join("publish")
-                .join("AudioBridge.exe")
-        );
-        assert!(resolved.audio_bridge.starts_with(&roots.repository));
-    }
-
-    #[test]
-    fn release_audiobridge_is_bundled_sidecar() {
-        let directory = tempfile::tempdir().unwrap();
-        let roots = roots(&directory, false);
-        write_template(&roots);
-        let resolved = resolve_owned_paths(&roots).expect("template present");
-        assert_eq!(
-            resolved.audio_bridge,
-            roots
-                .resource_root
-                .join("audio-bridge")
-                .join("AudioBridge.exe")
-        );
-        assert!(resolved.audio_bridge.starts_with(&roots.resource_root));
     }
 
     #[test]
@@ -275,7 +221,7 @@ mod tests {
     #[test]
     fn vb_cable_pack_is_optional() {
         let directory = tempfile::tempdir().unwrap();
-        let roots = roots(&directory, true);
+        let roots = roots(&directory);
         write_template(&roots);
         let resolved = resolve_owned_paths(&roots).expect("template present");
         assert_eq!(

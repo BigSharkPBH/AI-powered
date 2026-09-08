@@ -34,9 +34,6 @@ crop_*.png
 *.tsbuildinfo
 __pycache__/
 *.py[cod]
-native/**/bin/
-native/**/obj/
-native/**/publish/
 .desktop-runtime/
 .worktrees/
 .idea/
